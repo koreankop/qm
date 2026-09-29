@@ -115,7 +115,7 @@ function harnessTurn(overrides: Partial<HarnessTurnInput> = {}): {
   return { turn, entries, modelCalls, llmRequests };
 }
 
-test("a steered turn persists every reply, not only the last result's", async () => {
+test("a steered turn persists and delivers every reply, not only the last result's", async () => {
   const signals = createMemoryRunSignalStore();
   const runId = "run-steer";
   currentScript = async function* (prompts) {
@@ -144,7 +144,7 @@ test("a steered turn persists every reply, not only the last result's", async ()
   const { turn, entries } = harnessTurn({ runId });
   const result = await harness.turns.runTurn(turn);
 
-  assert.equal(result.reply, "All four done.");
+  assert.equal(result.reply, "The capital of France is Paris.\n\nAll four done.");
   const assistantTexts = entries
     .filter((entry) => entry.type === "assistant")
     .map((entry) => (entry.payload as { text: string }).text);
@@ -416,6 +416,33 @@ test("a steer folded into the running turn ends the turn at that turn's result",
     ["what is the capital of france?", "and what approval?"],
   );
   assert.equal((await signals.pending(runId)).length, 0, "an echoed steer is acknowledged, not left to replay");
+});
+
+test("a stop after a finished answer still delivers that answer once", { timeout: 5_000 }, async () => {
+  const signals = createMemoryRunSignalStore();
+  const runId = "run-stop-after-answer";
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    const initial = (await iterator.next()).value as unknown as FakeSdkMessage;
+    yield initial;
+    await signals.send(runId, { kind: "steer", text: "and one more thing", ts: "123.461" });
+    await iterator.next();
+    yield assistantMessage("msg_A", "Here is the answer.", {});
+    yield resultMessage("Here is the answer.");
+    await signals.send(runId, { kind: "abort" });
+    await iterator.next();
+  };
+
+  const harness = createClaudeHarness({ signals });
+  const { turn, entries } = harnessTurn({ runId });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.stopped, true);
+  assert.equal(result.reply, "Here is the answer.");
+  assert.deepEqual(
+    entries.filter((entry) => entry.type === "assistant").map((entry) => (entry.payload as { text: string }).text),
+    ["Here is the answer."],
+  );
 });
 
 test("each steered prompt gets its own LLM request record", async () => {
