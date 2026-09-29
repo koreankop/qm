@@ -755,7 +755,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
             await tapeReplyCheckpoint(turn, finalEntry);
           }
           streamedText = "";
-          pendingPrompts = Math.max(0, pendingPrompts - 1);
+          pendingPrompts = steerPrompts.length;
           if (pendingPrompts > 0) continue;
           if (!signalsStopped) {
             await stopSignals?.();
