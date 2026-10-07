@@ -159,6 +159,21 @@ test("env-delivery credential: envKey validated, host refused, duplicates refuse
       400,
       "AGENT_* reserved",
     );
+    for (const reserved of ["PATH", "LD_PRELOAD", "NODE_OPTIONS"]) {
+      assert.equal(
+        (
+          await putCred(srv.base, {
+            slug: "browse-steel",
+            name: "Steel",
+            delivery: "env",
+            envKey: reserved,
+            secret: "s1",
+          })
+        ).status,
+        400,
+        `${reserved} reserved`,
+      );
+    }
     assert.equal(
       (
         await putCred(srv.base, {

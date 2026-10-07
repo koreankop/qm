@@ -215,11 +215,33 @@ export function isValidCredentialSlug(slug: string): boolean {
   return /^[a-z0-9][a-z0-9-]{0,62}$/.test(slug);
 }
 
-const RESERVED_ENV_PREFIXES = ["AGENT_", "LD_"];
-const RESERVED_ENV_KEYS = new Set(["PATH", "HOME", "BASH_ENV", "NODE_OPTIONS"]);
+const RESERVED_ENV_PREFIXES = ["AGENT_", "LD_", "DYLD_", "GIT_CONFIG"];
+const RESERVED_ENV_KEYS = new Set([
+  "PATH",
+  "HOME",
+  "SHELL",
+  "SHELLOPTS",
+  "ENV",
+  "BASH_ENV",
+  "IFS",
+  "PS4",
+  "PROMPT_COMMAND",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "RUBYOPT",
+  "PERL5OPT",
+  "PERL5LIB",
+  "GIT_SSH",
+  "GIT_SSH_COMMAND",
+  "GIT_ASKPASS",
+  "GIT_EXEC_PATH",
+]);
 
 function isReservedEnvKey(envKey: string): boolean {
-  return RESERVED_ENV_KEYS.has(envKey) || RESERVED_ENV_PREFIXES.some((prefix) => envKey.startsWith(prefix));
+  const key = envKey.toUpperCase();
+  return RESERVED_ENV_KEYS.has(key) || RESERVED_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
 export function isValidCredentialEnvKey(envKey: string): boolean {
@@ -569,6 +591,12 @@ export function createKeychain(deps: {
       const legacyUsername = (rec as { username?: string }).username;
       if (legacyUsername) env.push({ key: legacyUsernameEnvKey(envKey), value: legacyUsername, secret: false });
     }
+    const reserved = env.find((e) => isReservedEnvKey(e.key));
+    if (reserved)
+      throw new KeychainError(
+        409,
+        `credential ${rec.service} exports reserved environment variable ${reserved.key}; save it again under another name`,
+      );
     return {
       credentialId: rec.id,
       ownerId: rec.ownerId,
@@ -598,7 +626,7 @@ export function createKeychain(deps: {
       return fn(rec);
     } catch (err) {
       console.error(
-        `[keychain] credential ${rec.id} (${rec.service}, owner ${rec.ownerId}) does not decrypt under the current key — skipped: ${errMessage(err)}`,
+        `[keychain] credential ${rec.id} (${rec.service}, owner ${rec.ownerId}) could not be materialized — skipped: ${errMessage(err)}`,
       );
       return null;
     }
@@ -674,7 +702,7 @@ export function createKeychain(deps: {
     if (delivery === "env") {
       if (!input.envKey || !isValidServiceCredentialEnvKey(input.envKey)) {
         throw new Error(
-          `env-delivery credential ${input.slug} needs an UPPER_SNAKE_CASE envKey outside AGENT_* (got ${JSON.stringify(input.envKey ?? null)})`,
+          `env-delivery credential ${input.slug} needs an UPPER_SNAKE_CASE envKey that is not a reserved environment variable (got ${JSON.stringify(input.envKey ?? null)})`,
         );
       }
     } else if (input.envKey) {
@@ -992,7 +1020,7 @@ export function createKeychain(deps: {
         : { kind: "env" as const, ...decryptToEnv(c, extra) },
     );
     if (!materialized) {
-      throw new KeychainError(422, "credential does not decrypt under the current key");
+      throw new KeychainError(422, "credential could not be materialized");
     }
     return materialized;
   }

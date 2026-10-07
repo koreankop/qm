@@ -1142,7 +1142,7 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
       if (delivery === "env") {
         if (!envKey || !isValidServiceCredentialEnvKey(envKey)) {
           return {
-            error: "env delivery requires an UPPER_SNAKE_CASE env var name outside the reserved AGENT_* namespace",
+            error: "env delivery requires an UPPER_SNAKE_CASE env var name that is not reserved by the platform",
           };
         }
         const clash = allCreds.find((c) => c.slug !== slug && c.delivery === "env" && c.envKey === envKey);

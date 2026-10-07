@@ -161,7 +161,23 @@ test("save rejects env keys that would override the agent's API endpoint, loader
       reserved,
     );
   }
+  for (const variant of ["path", "Home", "ld_preload", "dyld_insert_libraries", "GIT_SSH_COMMAND", "PYTHONPATH"]) {
+    await assert.rejects(k.save({ ...GH, envKey: variant }), /non-reserved/, variant);
+  }
   await k.save({ ...GH, envKey: "LDAP_TOKEN" });
+  await k.save({ ...GH, envKey: "GIT_TOKEN" });
+});
+
+test("materialize refuses a legacy record stored under a reserved env key", async () => {
+  const creds = createMemoryMap<import("../src/credentials/keychain.ts").KeychainCredential>();
+  const k = createKeychain({ creds, grants: createMemoryMap(), asks: createMemoryMap(), key: KEY });
+  const meta = await k.save(GH);
+  await creds.merge(meta.id, { envKey: "LD_PRELOAD" });
+  assert.deepEqual(await k.materializeOwn("U1"), [], "a reserved key is never exported");
+  await assert.rejects(
+    k.materializeOwnById("U1", meta.id, scopeId("personal", "U1")),
+    (e: KeychainError) => e.status === 422,
+  );
 });
 
 test("only the owner can grant; materialize is scope-checked; once-grants are consumed", async () => {

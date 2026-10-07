@@ -261,6 +261,16 @@ describe("/v1/keychain/drops — mint, form, redeem", async () => {
     assert.equal(res.status, 403);
   });
 
+  it("rejects a reserved envKey at mint so the one-shot link is never burned on a failed save", async () => {
+    const cap = await capFor("U_A");
+    for (const envKey of ["PATH", "AGENT_API_URL", "ld_preload"]) {
+      const res = await post("/v1/keychain/drops", { service: "linear", purpose: "p", envKey }, cap);
+      assert.equal(res.status, 400, envKey);
+    }
+    const ok = await post("/v1/keychain/drops", { service: "linear", purpose: "p", envKey: "LINEAR_API_KEY" }, cap);
+    assert.equal(ok.status, 200);
+  });
+
   it("mints onBehalfOf a teammate who steered this live turn, binding the link to them", async () => {
     const THREAD = "ch:C1:1700000000.000200";
     const { run } = await built.runs.enqueue({

@@ -205,6 +205,12 @@ async function mintDrop(ctx: ApiCtx): Promise<void> {
       message: `fields must be 1–${MAX_DROP_FIELDS} items of { key: ENV_VAR_NAME, label?, secret? } with unique keys`,
     });
   }
+  if (typeof b.envKey === "string" && b.envKey.trim() && !isValidCredentialEnvKey(b.envKey.trim())) {
+    return sendJson(res, 400, {
+      error: "bad_request",
+      message: "envKey must be a valid, non-reserved environment-variable name",
+    });
+  }
   let ownerId = capability.actorId;
   if (typeof b.onBehalfOf === "string" && b.onBehalfOf.trim() && !samePerson(b.onBehalfOf, capability.actorId)) {
     const speaker = await verifiedConversationSpeaker(ctx, b.onBehalfOf.trim());
