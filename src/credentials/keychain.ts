@@ -215,8 +215,19 @@ export function isValidCredentialSlug(slug: string): boolean {
   return /^[a-z0-9][a-z0-9-]{0,62}$/.test(slug);
 }
 
+const RESERVED_ENV_PREFIXES = ["AGENT_", "LD_"];
+const RESERVED_ENV_KEYS = new Set(["PATH", "HOME", "BASH_ENV", "NODE_OPTIONS"]);
+
+function isReservedEnvKey(envKey: string): boolean {
+  return RESERVED_ENV_KEYS.has(envKey) || RESERVED_ENV_PREFIXES.some((prefix) => envKey.startsWith(prefix));
+}
+
+export function isValidCredentialEnvKey(envKey: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(envKey) && !isReservedEnvKey(envKey);
+}
+
 export function isValidServiceCredentialEnvKey(envKey: string): boolean {
-  return /^[A-Z][A-Z0-9_]*$/.test(envKey) && !envKey.startsWith("AGENT_");
+  return /^[A-Z][A-Z0-9_]*$/.test(envKey) && !isReservedEnvKey(envKey);
 }
 
 export interface ServiceCredentialReader {
@@ -476,8 +487,6 @@ function credId(ownerId: string, service: string, slot: string): string {
 function defaultEnvKey(service: string): string {
   return `${service.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_TOKEN`;
 }
-
-const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function legacyUsernameEnvKey(passwordEnvKey: string): string {
   const base = passwordEnvKey.replace(/_(PASSWORD|PASS|TOKEN|SECRET|API_KEY|KEY)$/i, "");
@@ -875,8 +884,8 @@ export function createKeychain(deps: {
         ? input.fields.map((f) => ({ envKey: f.envKey.trim(), value: f.value, secret: f.secret !== false }))
         : undefined;
     if (fields) {
-      if (fields.some((f) => !ENV_KEY_RE.test(f.envKey)))
-        throw new KeychainError(400, "each credential field needs a valid environment-variable envKey");
+      if (fields.some((f) => !isValidCredentialEnvKey(f.envKey)))
+        throw new KeychainError(400, "each credential field needs a valid, non-reserved environment-variable envKey");
       if (fields.some((f) => !f.value || !f.value.trim()))
         throw new KeychainError(400, "each credential field needs a value");
       if (new Set(fields.map((f) => f.envKey)).size !== fields.length)
@@ -887,8 +896,8 @@ export function createKeychain(deps: {
     else if (fields) secret = JSON.stringify(Object.fromEntries(fields.map((f) => [f.envKey, f.value])));
     if (!secret || !secret.trim()) throw new KeychainError(400, "empty secret");
     const envKey = kind === "env" && !fields ? input.envKey?.trim() || defaultEnvKey(service) : undefined;
-    if (envKey && !ENV_KEY_RE.test(envKey))
-      throw new KeychainError(400, "envKey must be a valid environment-variable name");
+    if (envKey && !isValidCredentialEnvKey(envKey))
+      throw new KeychainError(400, "envKey must be a valid, non-reserved environment-variable name");
     const fieldsMeta = fields?.map((f) => ({ envKey: f.envKey, secret: f.secret }));
     const targets = files?.map((f) => f.path);
     const t = now();

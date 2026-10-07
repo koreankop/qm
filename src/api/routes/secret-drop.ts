@@ -5,7 +5,7 @@ import {
   SECRET_DROP_AUD,
   type CapabilityClaims,
 } from "../../auth/capability-token.ts";
-import { KeychainError, type GrantMode } from "../../credentials/keychain.ts";
+import { KeychainError, isValidCredentialEnvKey, type GrantMode } from "../../credentials/keychain.ts";
 import { SECRET_DROP_TTL_MS, type SecretDropField, type SecretDropRecord } from "../../credentials/secret-drop.ts";
 import { isSharedScope, parseScopeId } from "../../types.ts";
 import { samePerson } from "../../directory/person.ts";
@@ -62,7 +62,6 @@ ${content}
 }
 
 const MAX_DROP_FIELDS = 8;
-const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function parseDropFields(raw: unknown): SecretDropField[] | undefined | "invalid" {
   if (raw === undefined) return undefined;
@@ -71,7 +70,7 @@ function parseDropFields(raw: unknown): SecretDropField[] | undefined | "invalid
   const seen = new Set<string>();
   for (const f of raw) {
     const key = (f as { key?: unknown })?.key;
-    if (typeof key !== "string" || !ENV_KEY_RE.test(key) || seen.has(key)) return "invalid";
+    if (typeof key !== "string" || !isValidCredentialEnvKey(key) || seen.has(key)) return "invalid";
     seen.add(key);
     const labelRaw = (f as { label?: unknown })?.label;
     const label = typeof labelRaw === "string" && labelRaw.trim() ? labelRaw.trim().slice(0, 80) : undefined;

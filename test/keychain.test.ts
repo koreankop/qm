@@ -143,6 +143,27 @@ test("envKey defaults from the service name (github → GITHUB_TOKEN)", async ()
   assert.equal(meta.service, "github");
 });
 
+test("save rejects env keys that would override the agent's API endpoint, loader, or shell", async () => {
+  const k = kc();
+  for (const reserved of [
+    "AGENT_API_URL",
+    "AGENT_API_TOKEN",
+    "LD_PRELOAD",
+    "PATH",
+    "HOME",
+    "BASH_ENV",
+    "NODE_OPTIONS",
+  ]) {
+    await assert.rejects(k.save({ ...GH, envKey: reserved }), /non-reserved environment-variable name/, reserved);
+    await assert.rejects(
+      k.save({ ownerId: "U1", service: "github", secret: "x", fields: [{ envKey: reserved, value: "v" }] }),
+      /non-reserved environment-variable envKey/,
+      reserved,
+    );
+  }
+  await k.save({ ...GH, envKey: "LDAP_TOKEN" });
+});
+
 test("only the owner can grant; materialize is scope-checked; once-grants are consumed", async () => {
   const k = kc();
   const cred = await k.save(GH);
