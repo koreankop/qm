@@ -1,6 +1,8 @@
+import { LOOP_ICON_ERROR, validLoopIcon } from "../../loops/loop-store.ts";
 import { boundLoopCron } from "../../loops/authority.ts";
 import { unattendedGrantRefusal } from "../../cron/authority.ts";
-import type { Loop, LoopState } from "../../types.ts";
+import type { AdvisoryLock } from "../../persistence/advisory-lock.ts";
+import type { Loop, LoopState, LoopTriageConfig } from "../../types.ts";
 import { scopeId, type ScopeId } from "../../types.ts";
 import type { CapabilityClaims } from "../../auth/capability-token.ts";
 import type { LoopStore, CreateLoopInput, LoopPatch } from "../../loops/loop-store.ts";
@@ -10,6 +12,8 @@ import type { ShipGrantStore } from "../../loops/ship-grant-store.ts";
 import type { LoopFireService } from "../../loops/loop-fire.ts";
 import { collectVitals } from "../../loops/governor.ts";
 import { buildShipGrant } from "../../loops/ship-gate.ts";
+import { consolidates, sortLedgerItems } from "../../loops/ledger-view.ts";
+import { settleGroup } from "../../loops/triage.ts";
 import type { CronStore } from "../../cron/cron-store.ts";
 import { DEFAULT_CRON_TIMEZONE, userScheduleFromBody, validateUserSchedule } from "../../cron/schedule.ts";
 import type { ScopedConfigStore } from "../../resolution/config-store.ts";
@@ -20,6 +24,7 @@ import { isObj, resolveCapabilityDestination } from "./shared.ts";
 import { type ApiCtx, type Route } from "./route.ts";
 
 export interface LoopServiceDeps {
+  lock?: AdvisoryLock;
   store: LoopStore;
   items: LoopItemLedger;
   outputs: LoopOutputStore;
@@ -62,7 +67,7 @@ function requireLiveHuman(ctx: ApiCtx, acting: ActingPrincipal): boolean {
   return false;
 }
 
-async function canAdministerLoop(ctx: ApiCtx, loop: Loop, acting: ActingPrincipal): Promise<boolean> {
+export async function canAdministerLoop(ctx: ApiCtx, loop: Loop, acting: ActingPrincipal): Promise<boolean> {
   const { app } = ctx;
   if (await app.membershipControlsScope(loop.ownerScopeId)) {
     return app.managesScope(acting.actorId, loop.ownerScopeId);
@@ -173,12 +178,35 @@ function capsFromBody(value: unknown): NumericBody<Loop["caps"]> {
   return { value: caps };
 }
 
+const TRIAGE_INSTRUCTIONS_MAX = 4000;
+
+function triageFromBody(value: unknown): LoopTriageConfig | null | undefined {
+  if (value === undefined) return undefined;
+  if (!isObj(value)) return null;
+  const config: LoopTriageConfig = {};
+  for (const key of ["prioritize", "consolidate"] as const) {
+    const raw = value[key];
+    if (raw === undefined) continue;
+    if (!isObj(raw) || typeof raw.enabled !== "boolean") return null;
+    if (raw.instructions !== undefined && typeof raw.instructions !== "string") return null;
+    const instructions = typeof raw.instructions === "string" ? raw.instructions.trim() : undefined;
+    if (instructions !== undefined && instructions.length > TRIAGE_INSTRUCTIONS_MAX) return null;
+    config[key] = { enabled: raw.enabled, ...(instructions !== undefined ? { instructions } : {}) };
+  }
+  return config;
+}
+
 async function createLoop(ctx: ApiCtx): Promise<void> {
   const deps = loopDeps(ctx);
   if (!deps) return sendJson(ctx.res, 404, { error: "not_found", message: "loops are not wired on this deployment" });
   const acting = actingPrincipal(ctx);
   if (!acting) return;
   const b = isObj(ctx.body) ? ctx.body : {};
+  if (b.icon !== undefined && !validLoopIcon(b.icon))
+    return sendJson(ctx.res, 400, {
+      error: "bad_request",
+      message: LOOP_ICON_ERROR,
+    });
   if (typeof b.name !== "string" || !b.name.trim())
     return sendJson(ctx.res, 400, { error: "bad_request", message: "name required" });
   if (typeof b.playbook !== "string" || !b.playbook.trim())
@@ -249,6 +277,7 @@ async function createLoop(ctx: ApiCtx): Promise<void> {
     createdBy: acting.actorId,
     ownerScopeId,
     name: b.name,
+    ...(b.icon !== undefined ? { icon: b.icon as string | null } : {}),
     playbook: b.playbook,
     successCondition: b.successCondition,
     shipActions,
@@ -308,17 +337,29 @@ async function listLoops(ctx: ApiCtx): Promise<void> {
   return sendJson(ctx.res, 200, { loops: visible });
 }
 
+async function triageAvailable(ctx: ApiCtx, loop: Loop): Promise<boolean> {
+  return (await ctx.deps.featureFlags?.enabled("loop_triage", scopeId("personal", loop.owner))) === true;
+}
+
 async function getLoop(ctx: ApiCtx): Promise<void> {
   const loaded = await loadAdministrable(ctx);
   if (!loaded) return;
   const { deps, loop } = loaded;
-  const [items, outputs, grants, vitals] = await Promise.all([
+  const [items, outputs, grants, vitals, triage] = await Promise.all([
     deps.items.byLoop(loop.id),
     deps.outputs.byLoop(loop.id),
     deps.grants.byLoop(loop.id),
     collectVitals(loop, { items: deps.items, outputs: deps.outputs }, Date.now()),
+    triageAvailable(ctx, loop),
   ]);
-  return sendJson(ctx.res, 200, { loop, items, outputs, grants, vitals });
+  return sendJson(ctx.res, 200, {
+    loop,
+    items: sortLedgerItems(items, loop),
+    outputs,
+    grants,
+    vitals,
+    triageAvailable: triage,
+  });
 }
 
 const STATES = new Set<LoopState>(["enabled", "paused", "quarantined", "archived"]);
@@ -329,6 +370,11 @@ async function patchLoop(ctx: ApiCtx): Promise<void> {
   const { deps, loop, acting } = loaded;
   if (!(await requireLoopAuthority(ctx, deps, loop))) return;
   const b = isObj(ctx.body) ? ctx.body : {};
+  if (b.icon !== undefined && !validLoopIcon(b.icon))
+    return sendJson(ctx.res, 400, {
+      error: "bad_request",
+      message: LOOP_ICON_ERROR,
+    });
   const patch: LoopPatch = {};
   if (typeof b.playbook === "string" && b.playbook.trim()) {
     patch.playbookEdit = {
@@ -357,6 +403,7 @@ async function patchLoop(ctx: ApiCtx): Promise<void> {
     return sendJson(ctx.res, 400, { error: "bad_request", message: "state must be a string" });
   }
   Object.assign(patch, {
+    ...(b.icon !== undefined ? { icon: b.icon } : {}),
     ...(typeof b.name === "string" && b.name.trim() ? { name: b.name } : {}),
     ...(typeof b.purpose === "string" ? { purpose: b.purpose } : {}),
     ...(typeof b.successCondition === "string" && b.successCondition.trim()
@@ -395,6 +442,22 @@ async function patchLoop(ctx: ApiCtx): Promise<void> {
     });
   const caps = capsResult.value;
   if (caps !== undefined) patch.caps = caps;
+  const triage = triageFromBody(b.triage);
+  if (triage === null)
+    return sendJson(ctx.res, 400, {
+      error: "bad_request",
+      message: `triage must be {prioritize?, consolidate?: {enabled: boolean, instructions?: string up to ${TRIAGE_INSTRUCTIONS_MAX} chars}}`,
+    });
+  if (triage !== undefined) {
+    const enabling = Object.values(triage).some((setting) => setting?.enabled === true);
+    if (enabling && !(await triageAvailable(ctx, loop)))
+      return sendJson(ctx.res, 403, {
+        error: "forbidden",
+        message: "loop triage is not enabled for this loop's owner",
+      });
+    if (!requireLiveHuman(ctx, acting)) return;
+    patch.triage = triage;
+  }
   if (b.destinationKey !== undefined) {
     if (b.destinationKey !== null && typeof b.destinationKey !== "string")
       return sendJson(ctx.res, 400, { error: "bad_request", message: "destinationKey must be a string or null" });
@@ -443,6 +506,28 @@ async function deleteLoop(ctx: ApiCtx): Promise<void> {
   return sendJson(ctx.res, 200, { ok: true });
 }
 
+async function previewLoopTriage(ctx: ApiCtx): Promise<void> {
+  const loaded = await loadAdministrable(ctx);
+  if (!loaded) return;
+  const { deps, loop, acting } = loaded;
+  if (!(await requireLoopAuthority(ctx, deps, loop))) return;
+  if (!deps.fire || !(await triageAvailable(ctx, loop)))
+    return sendJson(ctx.res, 404, { error: "not_found", message: "loop triage is not available" });
+  const triage = triageFromBody(isObj(ctx.body) ? ctx.body.triage : undefined);
+  if (!triage)
+    return sendJson(ctx.res, 400, {
+      error: "bad_request",
+      message: `triage must be {prioritize?, consolidate?: {enabled: boolean, instructions?: string up to ${TRIAGE_INSTRUCTIONS_MAX} chars}}`,
+    });
+  if (!requireLiveHuman(ctx, acting)) return;
+  try {
+    const items = await deps.fire.previewTriage(loop, { ...loop.triage, ...triage });
+    return sendJson(ctx.res, 200, { items });
+  } catch (e) {
+    return sendJson(ctx.res, 502, { error: "preview_failed", message: errMessage(e) });
+  }
+}
+
 async function fireLoopNow(ctx: ApiCtx): Promise<void> {
   const loaded = await loadAdministrable(ctx);
   if (!loaded) return;
@@ -455,6 +540,13 @@ async function fireLoopNow(ctx: ApiCtx): Promise<void> {
 }
 
 async function decideOutput(ctx: ApiCtx): Promise<void> {
+  const lock = loopDeps(ctx)?.lock;
+  if (lock && !ctx.capability)
+    return lock.withLock(`loop-lifecycle:${ctx.params.id ?? ""}`, () => decideOutputLocked(ctx));
+  return decideOutputLocked(ctx);
+}
+
+async function decideOutputLocked(ctx: ApiCtx): Promise<void> {
   const loaded = await loadAdministrable(ctx);
   if (!loaded) return;
   const { deps, loop, acting } = loaded;
@@ -475,6 +567,9 @@ async function decideOutput(ctx: ApiCtx): Promise<void> {
     try {
       const shipped = await deps.fire.shipOutput(loop.id, outputId, acting.actorId, note);
       if (!shipped) return decisionMissing();
+      const item = await deps.items.get(shipped.itemId);
+      if (item && consolidates(loop))
+        await settleGroup(deps.items, item).catch((e: unknown) => swallow("loop group settle", e));
       return sendJson(ctx.res, 200, { output: shipped });
     } catch (e) {
       return sendJson(ctx.res, 502, { error: "ship_failed", message: errMessage(e) });
@@ -595,6 +690,7 @@ export const loopRoutes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "PATCH", path: "/v1/loops/:id", auth: "either", handle: patchLoop },
   { method: "DELETE", path: "/v1/loops/:id", auth: "either", handle: deleteLoop },
   { method: "POST", path: "/v1/loops/:id/fire", auth: "either", handle: fireLoopNow },
+  { method: "POST", path: "/v1/loops/:id/triage/preview", auth: "source", handle: previewLoopTriage },
   { method: "POST", path: "/v1/loops/:id/outputs/:outputId/decide", auth: "either", handle: decideOutput },
   { method: "POST", path: "/v1/loops/:id/grants", auth: "either", handle: graduateShipAction },
   { method: "POST", path: "/v1/loops/:id/autopilot", auth: "either", handle: setAutopilot },

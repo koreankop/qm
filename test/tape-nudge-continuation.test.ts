@@ -57,13 +57,16 @@ async function runScenario(
     failDirectDelivery?: boolean;
     failPrimaryTapeMessage?: boolean;
     nudgeCrash?: boolean;
+    nudgeStopped?: boolean;
     omitPrimaryCheckpoint?: boolean;
     staleNudgeRead?: boolean;
     stoppedPartial?: boolean;
     stoppedTapeComplete?: boolean;
+    resumedPrimary?: boolean;
   } = {},
 ) {
   const modes: Array<"shadow" | "serve" | undefined> = [];
+  const continued: Array<boolean | undefined> = [];
   const folds: unknown[][] = [];
   const harness = defineHarness(
     {
@@ -74,9 +77,13 @@ async function runScenario(
       capabilities: new Set(),
     },
     {
-      async runTurn(turn) {
-        modes.push(turn.tapeMode);
-        folds.push(turn.tapeFold ?? []);
+      async runTurn(dispatched) {
+        modes.push(dispatched.tapeMode);
+        folds.push(dispatched.tapeFold ?? []);
+        continued.push(dispatched.continueTurn);
+        const turn = dispatched.input.startsWith("(system note:")
+          ? { ...dispatched, input: "needs nudge" }
+          : dispatched;
         if (options.nudgeCrash && turn.input.startsWith("[system] You were addressed")) {
           throw new Error("fetch failed");
         }
@@ -91,6 +98,15 @@ async function runScenario(
           meta: { bareText: turn.input },
         });
         if (turn.input.startsWith("[system] You were addressed")) {
+          if (options.nudgeStopped) {
+            const reply = "Interrupted nudge partial";
+            await turn.emit({
+              type: "assistant",
+              payload: { text: reply, stopped: true },
+              scopeLabel: turn.scopeLabel,
+            });
+            return { reply, stopped: true, modelCalls: 1 };
+          }
           await turn.tape?.({
             kind: "message",
             harness: "pi",
@@ -277,11 +293,26 @@ async function runScenario(
   });
 
   await orchestrator.handleTurn(input("prime"));
+  if (options.resumedPrimary) {
+    const primed = (await sessions.getByThread(conversation.threadRef))!;
+    const { lease } = await sessions.acquireLease(primed.id);
+    try {
+      for (const entry of [
+        { type: "user" as const, payload: { text: "needs nudge" } },
+        { type: "tool_call" as const, payload: { tool: "execute", callId: "c1", command: "ls" } },
+        { type: "tool_result" as const, payload: { callId: "c1", result: "ok" } },
+      ])
+        await sessions.append(lease!, { ...entry, scopeLabel: primed.scopeId });
+    } finally {
+      await sessions.releaseLease(lease!);
+    }
+  }
   const second = orchestrator.handleTurn(
     input("needs nudge", {
       addressed: true,
       surfaceTools: true,
       deliveryTarget: "slack:C1:tape-nudge",
+      ...(options.resumedPrimary ? { attempt: 2 } : {}),
     }),
   );
   if (options.nudgeCrash) {
@@ -294,8 +325,22 @@ async function runScenario(
   const session = await sessions.getByThread(conversation.threadRef);
   const entries = await sessions.getEntries(session!.id);
   assert.equal(scope, session!.scopeId);
-  return { modes, folds, deliveries, sessions, session: session!, entries, orchestrator, input };
+  return { modes, folds, continued, deliveries, sessions, session: session!, entries, orchestrator, input };
 }
+
+test("only a resumed primary turn continues the assistant turn; its reply-or-decline nudge never does", async () => {
+  const { continued, deliveries } = await runScenario({ resumedPrimary: true });
+  assert.deepEqual(continued, [undefined, true, undefined]);
+  assert.equal(
+    (await deliveries.pending("slack")).some((delivery) => delivery.text === "nudged from tape"),
+    true,
+  );
+});
+
+test("an ordinary primary turn and its nudge never continue a prior assistant turn", async () => {
+  const { continued } = await runScenario();
+  assert.deepEqual(continued, [undefined, undefined, undefined]);
+});
 
 test("an exact first sub-turn continues its reply-or-decline nudge from the refreshed tape", async () => {
   const { modes, folds, deliveries, sessions, session, entries } = await runScenario();
@@ -427,11 +472,13 @@ test("consecutive stopped turns heal one import each and converge once a turn co
   assert.equal(await countImports(), 3, "no further imports once coverage is restored");
 });
 
-test("a stopped partial keeps withholding coverage when the direct delivery fails and the nudge replaces the result", async () => {
-  const { sessions, session, entries, orchestrator, input } = await runScenario({
+test("a user-stopped turn skips direct delivery and the reply nudge while preserving replay coverage", async () => {
+  const { modes, deliveries, sessions, session, entries, orchestrator, input } = await runScenario({
     stoppedPartial: true,
     failDirectDelivery: true,
   });
+  assert.deepEqual(modes, ["shadow", "serve"], "Stop must not invoke the harness again");
+  assert.deepEqual(await deliveries.pending("slack"), [], "Stop must not enqueue a reply");
   const partial = entries.find(
     (entry) =>
       entry.type === "assistant" && (entry.payload as { text?: unknown } | null)?.text === "worklog without a post",
@@ -439,7 +486,7 @@ test("a stopped partial keeps withholding coverage when the direct delivery fail
   assert.ok(partial);
   assert.ok(
     (await sessions.tapeCoverage(session.id)) < partial.seq,
-    "the nudge result must not launder the stopped primary into an advanced watermark",
+    "the stopped primary must not advance the watermark",
   );
 
   await orchestrator.handleTurn(input("continue after stop"));
@@ -493,10 +540,10 @@ test("overheard imports are this turn's own witnessed appends: served, watermark
 
 test("a failed overheard mirror fails the turn loudly; the next turn's read heals the gap", async () => {
   const { modes, folds, sessions, session, orchestrator, input } = await runScenario();
-  const realAppendTape = sessions.appendTape.bind(sessions);
-  sessions.appendTape = async (lease, rec) => {
-    if (rec.kind === "message" && rec.meta?.overheard) throw new Error("mirror down");
-    return realAppendTape(lease, rec);
+  const realAppendTapeMany = sessions.appendTapeMany.bind(sessions);
+  sessions.appendTapeMany = async (lease, records) => {
+    if (records.some((rec) => rec.kind === "message" && rec.meta?.overheard)) throw new Error("mirror down");
+    return realAppendTapeMany(lease, records);
   };
   await assert.rejects(
     orchestrator.handleTurn(
@@ -506,7 +553,7 @@ test("a failed overheard mirror fails the turn loudly; the next turn's read heal
     ),
     /mirror down/,
   );
-  sessions.appendTape = realAppendTape;
+  sessions.appendTapeMany = realAppendTapeMany;
   const withheld = await sessions.getEntries(session.id);
   assert.ok(
     (await sessions.tapeCoverage(session.id)) < withheld.at(-1)!.seq,
@@ -644,4 +691,11 @@ test("a cancel-stopped turn delivers nothing anywhere and returns silent", async
   );
   assert.equal(result.status, "silent", "the losing side of a cancellation never completes as deliverable");
   assert.deepEqual(posted, [], "no direct reply, no nudge, no fallback delivery from the cancelled turn");
+});
+
+test("Stop during the reply nudge suppresses its fallback delivery", async () => {
+  const { modes, deliveries, entries } = await runScenario({ nudgeStopped: true });
+  assert.deepEqual(modes, ["shadow", "serve", "serve"]);
+  assert.deepEqual(await deliveries.pending("slack"), []);
+  assert.ok(entries.some((entry) => entry.type === "assistant" && (entry.payload as { stopped?: boolean }).stopped));
 });

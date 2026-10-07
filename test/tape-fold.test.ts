@@ -4,6 +4,8 @@ import {
   filterTapeForAudience,
   foldTape,
   lintFold,
+  openTapeToolCalls,
+  withResumedToolResult,
   planTapeSeed,
   rehydrateFoldImages,
   tapeNeedsInterruptHeal,
@@ -249,6 +251,28 @@ test("compaction replaces the prefix up to its watermark boundary, keeps recent 
   );
 });
 
+test("compaction strips thinking from kept turns so later blocks bind to a stable prefix", () => {
+  seq = 0;
+  const think = (sig: string) => ({ type: "thinking", thinking: "", thinkingSignature: sig });
+  const rows = [
+    user("old q"),
+    assistant([think("old"), { type: "text", text: "old a" }]),
+    turnEnd(1),
+    user("recent q"),
+    assistant([think("recent"), { type: "text", text: "recent a" }]),
+    turnEnd(3),
+    row({ kind: "context_event", payload: { event: "compaction", text: "the old stuff" }, coversEntrySeq: 1 }),
+    user("post q"),
+    assistant([think("post"), { type: "text", text: "post a" }]),
+  ];
+  const out = foldTape(rows) as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
+  assert.deepEqual(
+    out.map((m) => m.content.map((b) => b.type)),
+    [["text"], ["text"], ["text"], ["text"], ["thinking", "text"]],
+  );
+  assert.deepEqual(out[2]!.content, [{ type: "text", text: "recent a" }]);
+});
+
 test("interrupt event heals dangling tool calls with error results", () => {
   seq = 0;
   const rows = [
@@ -368,6 +392,7 @@ test("audience filter withholds message rows the whole room isn't entitled to, n
         content: [{ type: "text", text: "U1's private DM text" }],
         isError: false,
         timestamp: 4,
+        interrupted: true,
       },
       scopeLabel: "personal:U1" as ScopeId,
     }),
@@ -387,6 +412,7 @@ test("audience filter withholds message rows the whole room isn't entitled to, n
   assert.equal(substituted.toolCallId, "c1");
   assert.equal(substituted.isError, true);
   assert.equal(substituted.content[0].text, INTERRUPTED_TOOL_RESULT);
+  assert.equal((substituted as { interrupted?: unknown }).interrupted, true, "the mark survives redaction");
   assert.ok(!JSON.stringify(room).includes("private DM text"), "withheld bytes never survive");
   assert.equal(room.filter((r) => r.kind === "context_event").length, 1, "events always survive");
   assert.equal(filterTapeForAudience(rows, [], scope, org).length, 0, "empty audience sees nothing");
@@ -730,4 +756,87 @@ test("dangling calls heal only after every image is rehydrated", async () => {
     2,
   );
   assert.ok(tapeNeedsInterruptHeal(rows, hydrated));
+});
+
+test("a toolResult row marked interrupted folds as the interrupted placeholder, so served turns match entry replay", () => {
+  const rows = [
+    user("run it"),
+    assistant([{ type: "toolCall", id: "c1", name: "execute", arguments: { command: "make" } }]),
+    row({
+      kind: "message",
+      payload: {
+        role: "toolResult",
+        toolCallId: "c1",
+        toolName: "execute",
+        content: [{ type: "text", text: "[exit 143]" }],
+        isError: false,
+        interrupted: true,
+      },
+    }),
+  ];
+  const fold = foldTape(rows) as Array<{ role: string; content: Array<{ text: string }>; isError?: boolean }>;
+  const result = fold.find((m) => m.role === "toolResult")!;
+  assert.equal(result.content[0]!.text, INTERRUPTED_TOOL_RESULT);
+  assert.equal(result.isError, true);
+  assert.ok(lintFold(fold).ok);
+  assert.deepEqual(openTapeToolCalls(rows).open, ["c1"], "a marked result leaves its call open for resume");
+});
+
+test("a later real result for the same call supersedes the interrupted one in place, so a retried call pairs once", () => {
+  const rows = [
+    user("run it"),
+    assistant([{ type: "toolCall", id: "c1", name: "history", arguments: { query: "budget" } }]),
+    row({
+      kind: "message",
+      payload: {
+        role: "toolResult",
+        toolCallId: "c1",
+        toolName: "history",
+        content: [{ type: "text", text: "[exit 143]" }],
+        isError: false,
+        interrupted: true,
+      },
+    }),
+    row({ kind: "message", payload: { role: "assistant", content: [], stopReason: "aborted", timestamp: 4 } }),
+    assistant([{ type: "text", text: "(stopped)" }]),
+    row({
+      kind: "message",
+      payload: {
+        role: "toolResult",
+        toolCallId: "c1",
+        toolName: "history",
+        content: [{ type: "text", text: "flat" }],
+        isError: false,
+      },
+    }),
+  ];
+  const fold = foldTape(rows) as Array<{ role: string; content: Array<{ text: string }>; stopReason?: string }>;
+  assert.deepEqual(
+    fold.map((m) => (m.role === "toolResult" ? `result:${m.content[0]!.text}` : m.role)),
+    ["user", "assistant", "result:flat", "assistant", "assistant"],
+    "the re-run result sits beside its call, not after the stop messages",
+  );
+  assert.ok(lintFold(fold).ok);
+  assert.deepEqual(openTapeToolCalls(rows).open, []);
+  assert.deepEqual(
+    withResumedToolResult(foldTape(rows.slice(0, 5)), rows[5]!.payload).map((m) =>
+      (m as { role: string }).role === "toolResult"
+        ? `result:${(m as { content: Array<{ text: string }> }).content[0]!.text}`
+        : (m as { role: string }).role,
+    ),
+    ["user", "assistant", "result:flat", "assistant", "assistant"],
+    "patching a served fold with the re-run result lands it in the same place",
+  );
+});
+
+test("lintFold flags an assistant message recorded between a tool call and its result", () => {
+  const call = { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "t", arguments: {} }] };
+  const result = { role: "toolResult", toolCallId: "c1", toolName: "t", content: [{ type: "text", text: "r" }] };
+  const stopped = { role: "assistant", content: [{ type: "text", text: "(stopped)" }], stopReason: "stop" };
+  const aborted = { role: "assistant", content: [], stopReason: "aborted" };
+  const lint = lintFold([{ role: "user", content: [] }, call, stopped, result]);
+  assert.ok(!lint.ok);
+  assert.ok(lint.problems.some((p) => p.includes("assistant message while 1 tool call(s) await results")));
+  assert.ok(lintFold([{ role: "user", content: [] }, call, aborted, result]).ok, "pi drops aborted partials at replay");
+  assert.ok(lintFold([{ role: "user", content: [] }, call, result, stopped]).ok);
 });

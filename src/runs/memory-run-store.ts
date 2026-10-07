@@ -152,10 +152,20 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
       const run = runs.get(runId);
       if (!run) return false;
       if (leaseToken !== null && run.leaseToken !== leaseToken) return false;
-      run.deliveryState = state;
+      run.deliveryState = { ...run.deliveryState, ...state };
       return true;
     },
 
+    async latestForThreads(threadRefs, opts) {
+      const wanted = new Set(threadRefs);
+      const latest = new Map<string, Run>();
+      for (const run of runs.values()) {
+        if (!wanted.has(run.sessionId) || (opts?.excludePrivateMessages && run.request.privateSessionMessage)) continue;
+        if (!latest.has(run.sessionId) || latest.get(run.sessionId)!.createdAt <= run.createdAt)
+          latest.set(run.sessionId, run);
+      }
+      return latest;
+    },
     async latestForThread(threadRef, opts) {
       return (
         [...runs.values()]
@@ -169,19 +179,41 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
       );
     },
     async pendingReturns(limit = 100, afterId = "") {
+      const now = Date.now();
       return [...runs.values()]
         .filter(
           (run) =>
             isTerminal(run.status) &&
-            !returned.has(run.id) &&
+            (retryAfter.get(run.id) ?? 0) <= now &&
+            (!returned.has(run.id) ||
+              (() => {
+                const wake = runs.get(byKey.get(`subagent-return:${run.id}`) ?? "");
+                return wake?.status === "pending" && wake.attempts === 0 && wake.turnUserSeq === null;
+              })()) &&
             run.id > afterId &&
             run.sessionId.startsWith("agent:main:subagent:"),
         )
         .sort((a, b) => a.id.localeCompare(b.id))
         .slice(0, limit);
     },
+    async terminalFinished(after, beforeMs, limit) {
+      return [...runs.values()]
+        .filter(
+          (run) =>
+            isTerminal(run.status) &&
+            run.finishedAt !== null &&
+            run.finishedAt <= beforeMs &&
+            (run.finishedAt > after.finishedAt || (run.finishedAt === after.finishedAt && run.id > after.id)),
+        )
+        .sort((a, b) => a.finishedAt! - b.finishedAt! || (a.id < b.id ? -1 : 1))
+        .slice(0, limit);
+    },
     async markReturned(runId) {
       returned.add(runId);
+    },
+    async deferReturn(runId, delayMs) {
+      const run = runs.get(runId);
+      if (run && isTerminal(run.status)) retryAfter.set(runId, Date.now() + Math.max(0, delayMs));
     },
     onTerminal(listener) {
       terminalListeners.push(listener);
@@ -219,9 +251,10 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
       return true;
     },
 
-    async withdraw(runId) {
+    async withdraw(runId, opts) {
       const run = runs.get(runId);
       if (!run || run.status !== "pending") return false;
+      if (opts?.unstartedOnly && (run.attempts !== 0 || run.turnUserSeq !== null)) return false;
       runs.delete(runId);
       retryAfter.delete(runId);
       if (run.dedupKey) byKey.delete(run.dedupKey);

@@ -22,7 +22,7 @@ import {
   SECRET_DROP_AUD,
   type CapabilityClaims,
 } from "../src/auth/capability-token.ts";
-import { signedRequestHeaders } from "../src/auth/source-auth-sign.ts";
+import { signedRequestHeaders } from "../plugins/chassis/src/source-auth-sign.ts";
 import { scopeId, type TurnRequest, type TurnResult } from "../src/types.ts";
 import { testConfig } from "./support/test-config.ts";
 
@@ -434,8 +434,8 @@ describe("/v1/keychain/drops — mint, form, redeem", async () => {
     const m = await built.keychain!.materialize(g!.grant.id, scopeId("channel", "C1"), "U_A");
     assert.ok(m.kind === "env");
     assert.deepEqual(m.kind === "env" ? m.env : [], [
-      { key: "DOORDASH_EMAIL", value: "alice@acme.co" },
-      { key: "DOORDASH_PASSWORD", value: "hunter2" },
+      { key: "DOORDASH_EMAIL", value: "alice@acme.co", secret: false },
+      { key: "DOORDASH_PASSWORD", value: "hunter2", secret: true },
     ]);
   });
 

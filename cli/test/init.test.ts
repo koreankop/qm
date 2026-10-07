@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { runInit } from "../src/commands/init.ts";
 import { CONFIG_FILENAME, loadConfigInDir } from "../src/config.ts";
 import { cliVersion } from "../src/manifest.ts";
-import { parseToolDescriptor, validateSandboxLayer } from "../src/sandbox-layer.ts";
+import { validateSandboxLayer } from "../src/sandbox-layer.ts";
+import { parseToolDescriptor } from "../src/tool-descriptor.ts";
 import { SERVICE_NAMES, VIRTUAL_SERVICE_NAMES } from "../src/services.ts";
 import { renderEnvExample } from "../src/secrets.ts";
 import { runChecks } from "../src/commands/check.ts";
@@ -257,6 +258,7 @@ test("init --target aws scaffolds the full hosted topology, Terraform, and the o
     assert.match(tfvars, /github_repository\s*= "replace-me\/repository"/);
     assert.match(tfvars, /deploy_microvm_image\s*= "acme-qm-sandbox"/);
     assert.match(tfvars, /certificate_arn\s*= ""/);
+    assert.doesNotMatch(tfvars, /db_instance_class/);
     assert.match(readFileSync(join(dir, "infra", "main.tf"), "utf8"), /desired_count\s*= 0/);
     const env = readFileSync(join(dir, ".env.example"), "utf8").split("\n");
     for (const name of ["ADMIN_GRANTS=", "PUBLIC_API_URL=", "AUTH_ALLOWED_EMAILS=", "ANTHROPIC_API_KEY="]) {

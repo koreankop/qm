@@ -1,3 +1,4 @@
+import type { AssistantSidebarContext } from "./assistant-sidebar";
 import type { Agent } from "@earendil-works/pi-agent-core";
 import type { TemplateResult, nothing } from "lit";
 import type { DensityTier } from "./density";
@@ -28,6 +29,7 @@ export interface ConvHost {
   density(): DensityTier;
   onDensityChange(handler: () => void): void;
   ensureDeliveryStream(): void;
+  inbox?: { context(): AssistantSidebarContext };
   onState?(state: PaneState): void;
   onExpand?(): void;
 }
@@ -91,8 +93,10 @@ export interface ChatSurface {
     anchorSeq?: number | null,
     inheritedMessages?: ReturnType<typeof entriesToMessages>,
   ): void;
-  mountLoadingPane(): void;
+  mountLoadingPane(): () => boolean;
+  mountLoadError(retry: () => void): void;
   scrollToBottom(): void;
+  revealEntry(seq: number): boolean;
   drawActiveChat(agent?: Agent | null, opts?: { forceScroll?: boolean }): void;
   setTranscriptWindow(anchorSeq: number | null, earlierCount: number, hasEarlier?: boolean): void;
   setPins(pins: import("./core-bridge").SessionPin[]): void;
@@ -123,7 +127,8 @@ interface ComposerState {
 }
 
 export interface ComposerSurface {
-  composerApprovalPanel(approvals: PendingApproval[]): TemplateResult;
+  composerApprovalPanel(approvals: PendingApproval[], resolve?: (decision: ApprovalDecision) => void): TemplateResult;
+  submit(instruction?: string): Promise<void>;
   restageAttachments(attachments: Attachment[], note: string): void;
   state: ComposerState;
   composerForm(agent: Agent, header?: TemplateResult | typeof nothing): TemplateResult;
@@ -133,6 +138,7 @@ export interface ComposerSurface {
   resetComposer(): void;
   focusComposerEnd(): void;
   fillSuggestedPrompt(prompt: string, agent: Agent): void;
+  addAnnotations(text: string, files: File[], annotationId?: string, remove?: boolean): Promise<boolean>;
   sendSuggestedPrompt(prompt: string, agent: Agent): Promise<void>;
   resizeComposer(): void;
   currentModelOption(): ModelOption | undefined;

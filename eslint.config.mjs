@@ -6,6 +6,7 @@ export default tseslint.config(
   {
     ignores: [
       "**/node_modules/",
+      "src/deploy/vendor/",
       "**/dist/",
       "**/dist-web/",
       "data/",
@@ -19,6 +20,14 @@ export default tseslint.config(
   },
   js.configs.recommended,
   tseslint.configs.recommended,
+  {
+    files: ["desktop/preload.cjs", "desktop/workspace-preload.cjs"],
+    rules: { "@typescript-eslint/no-require-imports": "off" },
+  },
+  {
+    files: ["desktop/setup.js", "desktop/workspace-preload.cjs"],
+    languageOptions: { globals: globals.browser },
+  },
   {
     files: ["**/*.js", "**/*.mjs", "**/*.cjs"],
     languageOptions: { globals: globals.node },

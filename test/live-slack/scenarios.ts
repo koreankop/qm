@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { assert, isLiveStatusText, type Scenario } from "./harness.ts";
-import { sleep } from "./slack.ts";
+import { assert, type Scenario } from "./harness.ts";
+import { sleep, type SlackMessage } from "./slack.ts";
 import { assertRuntimeHandoff } from "./runtime-handoff.ts";
 import { multiUserScenarios } from "./scenarios-multiuser.ts";
 import { twinScenarios } from "./scenarios-twin.ts";
+import { deployAccessScenarios } from "./scenarios-deploy-access.ts";
+import { credentialApprovalScenarios } from "./scenarios-credential-approval.ts";
 
 const RAW_MARKDOWN_ARTIFACTS: Array<[string, RegExp]> = [
   ["**bold**", /\*\*[^*\n]+\*\*/],
@@ -96,7 +98,12 @@ export const scenarios: Scenario[] = [
       });
       await ch.mention("fwd this screenshot to my DM with you, let's send a fix", fileTs);
       await ch.waitForBotReply(fileTs, { timeoutMs: SANDBOX_TIMEOUT - 30_000 });
-      const dmMsg = await dm.waitForBotReply(baseline, { timeoutMs: 90_000 }).catch(() => null);
+      const dmMsg = await dm
+        .waitForBotReply(baseline, {
+          timeoutMs: 90_000,
+          accept: (message) => (message.files ?? []).some((file) => (file.name ?? file.title ?? "").includes(marker)),
+        })
+        .catch(() => null);
       const forwarded = !!dmMsg && (dmMsg.files ?? []).some((f) => (f.name ?? f.title ?? "").includes(marker));
       assert.ok(
         forwarded,
@@ -137,12 +144,9 @@ export const scenarios: Scenario[] = [
     async run(ctx) {
       const ch = await ctx.freshChannel();
       const root = await ch.mention("Run `uname -a` in your sandbox and paste the exact output line.");
-      const reply = await ch.waitForBotReply(root, { timeoutMs: SANDBOX_TIMEOUT - 30_000 });
-      assert.match(
-        reply.text ?? "",
-        /Linux \S+ \d+\.\d+\.\S+/,
-        `no uname output in reply: ${reply.text?.slice(0, 300)}`,
-      );
+      const uname = /Linux \S+ \d+\.\d+\.\S+/;
+      const reply = await ch.waitForBotReply(root, { match: uname, timeoutMs: SANDBOX_TIMEOUT - 30_000 });
+      assert.match(reply.text ?? "", uname, `no uname output in reply: ${reply.text?.slice(0, 300)}`);
       const session = await ctx.core.findSessionByThread(ch.id, root);
       assert.ok(session, "no core session found for the thread");
       const ran = session.entries.some(
@@ -156,19 +160,36 @@ export const scenarios: Scenario[] = [
   },
   {
     name: "perf-budget",
-    lane: "parallel",
-    tags: ["sandbox", "quarantine"],
+    lane: "exclusive",
+    tags: ["sandbox"],
     timeoutMs: SANDBOX_TIMEOUT,
     async run(ctx) {
       const ch = await ctx.freshChannel();
-      const root = await ch.mention("Run `ls /` in your sandbox and paste the first line of output.");
-      await ch.waitForBotReply(root, { timeoutMs: SANDBOX_TIMEOUT - 30_000 });
+      const marker = ctx.marker("executed");
+      const root = await ch.mention(
+        `Run \`printf '%s%s\\n' '${marker.slice(0, -8)}' '${marker.slice(-8)}'\` in your sandbox and paste the exact output.`,
+      );
+      await ch.waitForBotReply(root, { match: new RegExp(marker), timeoutMs: SANDBOX_TIMEOUT - 30_000 });
 
       const session = await ctx.core.findSessionByThread(ch.id, root);
       assert.ok(session, "no core session found for the thread");
-      const ran = session.entries.some((e: any) => e.type === "tool_result");
-      assert.ok(ran, "core transcript has no tool_result — turn never exercised the platform's tool path");
+      const ran = session.entries.some(
+        (e: any) =>
+          e.type === "tool_result" &&
+          (e.payload?.tool === "execute" || (e.payload?.tool === "sandbox" && e.payload.action === "exec")) &&
+          e.payload.isError === false &&
+          e.payload.code === 0 &&
+          e.payload.timedOut === false &&
+          e.payload.stdout === `${marker}\n`,
+      );
+      assert.ok(ran, "core transcript has no successful command execution — cannot evaluate performance");
 
+      for (let attempt = 0; ; attempt++) {
+        const { entries } = await ctx.core.getSession(session.id);
+        if (entries.some((e: any) => e.type === "assistant" && typeof e.payload?.workFinishedAt === "number")) break;
+        assert.ok(attempt < 30, "turn did not finish recording its performance metrics");
+        await sleep(1000);
+      }
       const { requests } = (await ctx.core.getSessionLlm(session.id)) as {
         requests: Array<{ stepGapMs: number | null; gapPhases: Record<string, number> | null }>;
       };
@@ -220,13 +241,19 @@ export const scenarios: Scenario[] = [
       const root = await ch.mention(
         `Create a text file named ${marker}.txt containing the single line "hello from ci" and share the file here in this thread.`,
       );
-      await ch.waitForBotReply(root, { timeoutMs: SANDBOX_TIMEOUT - 30_000 });
+      const hasSharedFile = (message: SlackMessage) =>
+        (message.files ?? []).some((file) => (file.name ?? file.title ?? "").includes(marker)) ||
+        [
+          ...(message.text ?? "").matchAll(
+            /<https?:\/\/[^>\s|]+(?:\|[^>]+)?>|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|https?:\/\/[^\s<>]+/g,
+          ),
+        ].some(([link]) => link.includes(`${marker}.txt`));
+      await ch.waitForBotReply(root, {
+        timeoutMs: SANDBOX_TIMEOUT - 30_000,
+        accept: hasSharedFile,
+      });
       const botMsgs = await ch.botMessagesInThread(root);
-      const shared = botMsgs.some(
-        (m) =>
-          (m.files ?? []).some((f) => (f.name ?? f.title ?? "").includes(marker)) ||
-          (m.text ?? "").includes(`${marker}.txt`),
-      );
+      const shared = botMsgs.some(hasSharedFile);
       assert.ok(shared, `no shared file or file link mentioning ${marker}.txt found in thread`);
     },
   },
@@ -260,7 +287,7 @@ export const scenarios: Scenario[] = [
       const marker = ctx.marker();
       const before = String(Date.now() / 1000 - 5);
       const root = await ch.mention(
-        `Please post this status update to the #ci-target channel (you are a member there): "Live e2e check ${marker} — all systems normal." Then confirm here once it's posted.`,
+        `Please post this status update to channel <#${target}> (you are a member there): "Live e2e check ${marker} — all systems normal." Then confirm here once it's posted.`,
       );
       await ch.waitForBotReply(root, { timeoutMs: SANDBOX_TIMEOUT - 60_000 });
       let found = false;
@@ -269,7 +296,7 @@ export const scenarios: Scenario[] = [
         found = msgs.some((m) => m.user === ctx.env.botUserId && (m.text ?? "").includes(marker));
         if (!found) await sleep(5000);
       }
-      assert.ok(found, `no bot message containing ${marker} appeared in #ci-target`);
+      assert.ok(found, `no bot message containing ${marker} appeared in channel ${target}`);
     },
   },
   {
@@ -308,7 +335,7 @@ export const scenarios: Scenario[] = [
       const secret = ctx.marker("xchan");
       await ctx.env.qa.post(target!, `Heads-up for the bots: today's deploy ticket id is ${secret}.`);
       const root = await ch.mention(
-        "Someone just posted today's deploy ticket id in the #ci-target channel (you're a member there). " +
+        `Someone just posted today's deploy ticket id in channel <#${target}> (you're a member there). ` +
           "Read that channel's recent messages and reply with the ticket id exactly.",
       );
       const reply = await ch.waitForBotReply(root, { match: new RegExp(secret), timeoutMs: SANDBOX_TIMEOUT - 30_000 });
@@ -346,21 +373,27 @@ export const scenarios: Scenario[] = [
   {
     name: "long-task-streaming",
     lane: "parallel",
-    tags: ["quarantine"],
     timeoutMs: 5 * 60_000,
     async run(ctx) {
       const ch = await ctx.freshChannel();
       const frames: string[] = [];
+      let sawReaction = false;
       const root = await ch.mention(
         "Write a roughly 300-word explanation of how DNS resolution works, structured into four titled sections.",
       );
-      const reply = await ch.waitForBotReply(root, { timeoutMs: 4 * 60_000, onFrame: (t) => frames.push(t) });
+      const reply = await ch.waitForBotReply(root, {
+        timeoutMs: 4 * 60_000,
+        accept: (message) => (message.text ?? "").length > 500,
+        onFrame: (text) => frames.push(text),
+        onMessages: (messages) => {
+          if (messages.some((m) => m.user === ctx.env.botUserId && (m.text ?? "").length > 500)) return;
+          sawReaction ||=
+            messages.find((m) => m.ts === root)?.reactions?.some((r) => r.users.includes(ctx.env.botUserId)) === true;
+        },
+      });
       assert.ok((reply.text ?? "").length > 500, `final reply suspiciously short (${reply.text?.length} chars)`);
-      const sawProgress = frames.some(isLiveStatusText);
-      assert.ok(
-        sawProgress,
-        "never observed a streaming/status frame before the final reply (placeholder pipeline broken?)",
-      );
+      const sawProgress = sawReaction || frames.slice(0, frames.indexOf(reply.text ?? "")).some((text) => text.trim());
+      assert.ok(sawProgress, "never observed a bot reaction or acknowledgment before the final reply");
     },
   },
   {
@@ -397,7 +430,10 @@ export const scenarios: Scenario[] = [
       const ts = await dm.send(
         `Create a text file named ${marker}.txt containing the single line "hello from ci" and send me the file here.`,
       );
-      await dm.waitForBotReply(ts, { timeoutMs: SANDBOX_TIMEOUT - 30_000 });
+      await dm.waitForBotReply(ts, {
+        timeoutMs: SANDBOX_TIMEOUT - 30_000,
+        accept: (message) => (message.files ?? []).some((file) => (file.name ?? file.title ?? "").includes(marker)),
+      });
       const msgs = await ctx.env.qa.history(dm.id, ts);
       const delivered = msgs.some(
         (m) =>
@@ -512,4 +548,6 @@ export const scenarios: Scenario[] = [
   },
   ...multiUserScenarios,
   ...twinScenarios,
+  ...deployAccessScenarios,
+  ...credentialApprovalScenarios,
 ];

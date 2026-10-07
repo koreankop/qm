@@ -28,8 +28,16 @@ export function gzipAccepted(req: IncomingMessage | undefined): boolean {
   return explicit ?? wildcard ?? false;
 }
 
+export function withVary(res: ServerResponse, value: string): string {
+  const existing = res.getHeader("vary");
+  const tokens = [...(existing === undefined ? [] : String(existing).split(",")), ...value.split(",")]
+    .map((token) => token.trim())
+    .filter(Boolean);
+  return [...new Map(tokens.map((token) => [token.toLowerCase(), token])).values()].join(", ");
+}
+
 export function sendBuffered(res: ServerResponse, status: number, headers: Record<string, string>, body: string): void {
-  const out = { ...headers, vary: "accept-encoding" };
+  const out = { ...headers, vary: withVary(res, "accept-encoding") };
   if (Buffer.byteLength(body) < COMPRESS_MIN_BYTES || !gzipAccepted(res.req)) {
     res.writeHead(status, out);
     res.end(body);
@@ -78,9 +86,20 @@ export function escapeHtml(s: string): string {
   );
 }
 
-export function serveEmojiFavicon(res: ServerResponse, emoji: string, cacheControl: string): void {
-  res.writeHead(200, { "content-type": "image/svg+xml; charset=utf-8", "cache-control": cacheControl });
-  res.end(
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90" text-anchor="middle" x="50">${emoji}</text></svg>`,
-  );
+const SVG_DOCUMENT = /^<svg[\s>][\s\S]*<\/svg>$/i;
+
+function faviconSvg(icon: { svg?: string; emoji: string }): string {
+  const custom = icon.svg?.trim() ?? "";
+  if (SVG_DOCUMENT.test(custom)) return custom;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90" text-anchor="middle" x="50">${icon.emoji}</text></svg>`;
+}
+
+export function serveFavicon(res: ServerResponse, icon: { svg?: string; emoji: string }, cacheControl: string): void {
+  res.writeHead(200, {
+    "content-type": "image/svg+xml; charset=utf-8",
+    "cache-control": cacheControl,
+    "x-content-type-options": "nosniff",
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
+  });
+  res.end(faviconSvg(icon));
 }

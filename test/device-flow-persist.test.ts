@@ -20,6 +20,7 @@ import {
 import { scopeId, type TurnRequest } from "../src/types.ts";
 import { installGlobalFakeSprites, type FakeSprites } from "./support/fake-sprites.ts";
 import { testConfig } from "./support/test-config.ts";
+import { selectDefaultSandbox } from "./support/default-sandbox.ts";
 
 let ff: FakeSprites;
 before(() => {
@@ -38,8 +39,7 @@ function sprites() {
   const dir = mkdtempSync(join(tmpdir(), "dfp-ws-"));
   return createSpritesSandbox(createLocalWorkspaceStore(dir), {
     token: "test-token",
-    client: ff.client,
-    fetchImpl: ff.fetchImpl,
+    baseUrl: ff.baseUrl,
   });
 }
 const rw = (scope: string) => [{ scopeId: scope, mountPath: "", mode: "rw" as const }];
@@ -374,8 +374,7 @@ test("ACMECLI quarantine removes the canonical root even with no record or a sta
   const dir = mkdtempSync(join(tmpdir(), "dfp-ws-"));
   const sb = createSpritesSandbox(createLocalWorkspaceStore(dir), {
     token: "test-token",
-    client: ff.client,
-    fetchImpl: ff.fetchImpl,
+    baseUrl: ff.baseUrl,
     credentialPaths: [{ path: ".acmecli", kind: "directory" }],
   });
   const k = kc();
@@ -417,13 +416,15 @@ test("ACMECLI quarantine removes the canonical root even with no record or a sta
   );
 });
 
-function freshApp() {
-  return buildApp(
+async function freshApp() {
+  const built = buildApp(
     testConfig({
       dataDir: mkdtempSync(join(tmpdir(), "dfp-app-")),
       signingSecret: "device-flow-test-secret",
     }),
   );
+  await selectDefaultSandbox(built, "U1", scopeId("personal", "U1"), scopeId("channel", "C1"));
+  return built;
 }
 
 const actor = { externalId: "U1" };
@@ -442,7 +443,7 @@ function channel(text: string): TurnRequest {
 }
 
 test("a DM turn auto-captures a device-flow login under the PERSON, and a fresh machine gets it back", async () => {
-  const { app, keychain } = freshApp();
+  const { app, keychain } = await freshApp();
   const res = await app.turn(
     dm("!run mkdir -p ~/.config/gh && printf 'oauth_token: gho_E2E' > ~/.config/gh/hosts.yml && echo done"),
   );
@@ -460,7 +461,7 @@ test("a DM turn auto-captures a device-flow login under the PERSON, and a fresh 
 });
 
 test("a login performed on a shared channel box is keyed to the SCOPE, like its workspace", async () => {
-  const { app, keychain } = freshApp();
+  const { app, keychain } = await freshApp();
   const res = await app.turn(
     channel("!run mkdir -p ~/.config/glab && printf 'token: glpat_CH' > ~/.config/glab/config.yml && echo done"),
   );
@@ -472,7 +473,7 @@ test("a login performed on a shared channel box is keyed to the SCOPE, like its 
 });
 
 test("a capture failure is logged as an error event and does NOT fail the turn", async () => {
-  const { app, keychain, errors } = freshApp();
+  const { app, keychain, errors } = await freshApp();
   const realSave = keychain!.save.bind(keychain!);
   keychain!.save = async () => {
     throw new Error("injected keychain outage");
@@ -502,6 +503,7 @@ test("removing platform credential vending preserves stored quarantine on person
     const request = shared ? channel("!run echo ready") : dm("!run echo ready");
     const ownerId = shared ? scopeId("channel", "C1") : "U1";
     const targetScope = shared ? scopeId("channel", "C1") : scopeId("personal", "U1");
+    await selectDefaultSandbox(built, "U1", targetScope);
     await built.keychain!.save({
       ownerId,
       service: "acmecli",
@@ -1102,6 +1104,7 @@ test("removed layer tools retain quarantine, capture exclusion and reset-to-lega
     const request = shared ? channel("!run echo ready") : dm("!run echo ready");
     const ownerId = shared ? scopeId("channel", "C1") : "U1";
     const targetScope = shared ? scopeId("channel", "C1") : scopeId("personal", "U1");
+    await selectDefaultSandbox(built, "U1", targetScope);
     await built.keychain!.save({
       ownerId,
       service: "retired",

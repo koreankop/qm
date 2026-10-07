@@ -1,3 +1,4 @@
+import { credentialHandle } from "../src/credentials/keychain.ts";
 import "./support/auto-fake-sprites.ts";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -6,6 +7,7 @@ import { testConfig, TEST_CAPABILITY_SECRET } from "./support/test-config.ts";
 import { verifyCapabilityToken } from "../src/auth/capability-token.ts";
 import type { Config } from "../src/config.ts";
 import type { TurnRequest } from "../src/types.ts";
+import { sleep } from "../src/util/async.ts";
 
 // Full application/tool/materializer path, with deterministic model commands and
 // the repo's host-backed Sprites transport. This does not test VM isolation.
@@ -27,6 +29,15 @@ async function fixture(t: TestContext, config: Partial<Config> = {}) {
     );
   };
   await roster();
+  for (const [actor, scope] of [
+    ["U1", "personal:U1"],
+    ["U2", "personal:U2"],
+    ["U3", "personal:U3"],
+    ["U1", "channel:C1"],
+  ] as const) {
+    const computer = await built.sandboxResources.create(actor, scope, "sprites", "default");
+    await built.sandboxResources.setDefault(actor, scope, computer.id);
+  }
   await built.config.setSharingPosture("org:default-org", "open");
   const turn = async (text: string, room = false, actor = "U1", extra: Partial<TurnRequest> = {}) => {
     const result = await built.app.turn({
@@ -80,7 +91,7 @@ test("sharing e2e: personal files and memories follow the speaker, opt-out, and 
     await b.memory.capture(`personal:${id}`, [`OWN_MEMORY_${id}`], Date.now(), id!);
   }
   assert.equal(await b.turn("!read shared/open-personal-U1/notes.txt", true), "ALICE_PAYLOAD");
-  assert.match(await b.turn("!memorysearch OWN_MEMORY", true), /OWN_MEMORY_U1/);
+  assert.doesNotMatch(await b.turn("!memorysearch OWN_MEMORY", true), /OWN_MEMORY_U1/);
   assert.doesNotMatch(await b.turn("!sysprompt", true), /OWN_MEMORY_U2|open-personal-U2/);
   assert.match(await b.turn("!read shared/open-personal-U1/notes.txt", true, "U2"), /no file/);
   assert.equal(await b.turn("!read shared/open-personal-U2/notes.txt", true, "U2"), "BOB_PAYLOAD");
@@ -98,6 +109,82 @@ test("sharing e2e: personal files and memories follow the speaker, opt-out, and 
     await b.turn("!read shared/open-personal-U1/notes.txt", true, "U1", { origin: { kind: "automation" } }),
     /no file/,
   );
+});
+
+test("sharing e2e: delegated live sharing requires the current pilot flag and current sharing permission", async (t) => {
+  const b = await fixture(t, { apiBaseUrl: "https://core.example.com", signingSecret: "test-ingress-secret" });
+  await b.workspace.write("personal:U1", "notes.txt", "DELEGATED_PERSONAL_FILE");
+  await b.turn("inspect my personal notes", true);
+  const parent = await b.runs.latestForThread("C1:shared-test");
+  assert.ok(parent);
+  const parentSession = await b.sessions.getByThread(parent.sessionId);
+  assert.ok(parentSession);
+  const child = await b.sessions.getOrCreateByThread(
+    "agent:main:subagent:sharing-gate",
+    "channel",
+    parentSession.scopeId,
+  );
+  await b.sessions.setParentSession(child.id, parentSession.id);
+  await b.sessions.setSpawnMeta(child.id, {
+    actor: parent.request.actor,
+    conversation: parent.request.conversation,
+    surface: parent.request.surface ?? "test",
+  });
+  for (const person of parent.request.conversation.audience) await b.sessions.addParticipant(child.id, person.id);
+  let token: string | undefined;
+  const provision = b.sandbox.provision.bind(b.sandbox);
+  b.sandbox.provision = async (layers, opts) => {
+    token = opts?.env?.AGENT_API_TOKEN;
+    return provision(layers, opts);
+  };
+  b.runtime.startBackground();
+  const childTurn = async (text: string, expectedStatus: "ok" | "refused" = "ok") => {
+    const { run } = await b.runs.enqueue({
+      sessionId: child.threadRef,
+      request: {
+        ...parent.request,
+        conversation: { ...parent.request.conversation, threadRef: child.threadRef },
+        origin: { kind: "automation", screenData: text },
+        delegatingRunId: parent.id,
+        sessionSenderId: parentSession.id,
+        text,
+      },
+    });
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const current = await b.runs.get(run.id);
+      assert.ok(current);
+      if (current.status === "done" || current.status === "failed") {
+        assert.equal(current.result?.status, expectedStatus, JSON.stringify(current));
+        return current.result.reply ?? current.result.reason ?? "";
+      }
+      assert.ok(Date.now() < deadline, "delegated turn did not finish");
+      await sleep(25);
+    }
+  };
+  const read = "!read shared/open-personal-U1/notes.txt";
+  assert.match(await childTurn(read), /no file/);
+  await b.featureFlags.setEnabled("responsive_spine", "personal:U1", true, "U1");
+  assert.equal(await childTurn(read), "DELEGATED_PERSONAL_FILE");
+  assert.equal(await childTurn("!run echo delegated"), "delegated");
+  assert.ok(token);
+  const delegatedClaims = await verifyCapabilityToken(token, TEST_CAPABILITY_SECRET);
+  assert.equal(delegatedClaims?.liveAuthor, true);
+  assert.notEqual(delegatedClaims?.liveActor, true);
+  assert.equal(delegatedClaims?.triggered, true);
+  await b.config.setSharingPosture("personal:U1", "isolated");
+  assert.match(await childTurn(read), /no file/);
+  await b.config.clearSharingPosture("personal:U1");
+  await b.featureFlags.setEnabled("responsive_spine", "personal:U1", false, "U1");
+  assert.match(await childTurn(read), /no file/);
+  assert.equal(await childTurn("!run echo unprivileged"), "unprivileged");
+  assert.ok(token);
+  const unprivilegedClaims = await verifyCapabilityToken(token, TEST_CAPABILITY_SECRET);
+  assert.notEqual(unprivilegedClaims?.liveAuthor, true);
+  assert.notEqual(unprivilegedClaims?.liveActor, true);
+  await b.featureFlags.setEnabled("responsive_spine", "personal:U1", true, "U1");
+  await b.remove("U1");
+  assert.match(await childTurn(read, "refused"), /access is no longer current/);
 });
 
 test("sharing e2e: room file and memory access is revoked on the next DM turn", async (t) => {
@@ -318,7 +405,7 @@ test("sharing e2e: the execution capability excludes carried memories in both di
   assert.equal(dmClaims.memory.read.includes("channel:C1"), false);
 });
 
-test("sharing e2e: complete notebooks retain provenance without truncating late facts", async (t) => {
+test("sharing e2e: local notebooks retain late facts while unclassified carried memory stays private", async (t) => {
   const b = await fixture(t);
   await b.memory.capture(
     "personal:U1",
@@ -328,13 +415,14 @@ test("sharing e2e: complete notebooks retain provenance without truncating late 
   );
   await b.memory.capture("channel:C1", ["ROOM_FACT_END"], Date.now(), "U1");
   const p = await b.turn("!sysprompt", true);
-  assert.match(p, /### personal:U1[\s\S]*PERSONAL_FACT_119/);
+  assert.doesNotMatch(p, /PERSONAL_FACT_119/);
   assert.match(p, /### channel:C1[\s\S]*ROOM_FACT_END/);
-  assert.match(await b.turn("!memorysearch PERSONAL_FACT_119", true), /\[personal:U1\].*PERSONAL_FACT_119/);
+  assert.match(await b.turn("!sysprompt"), /PERSONAL_FACT_119/);
+  assert.doesNotMatch(await b.turn("!memorysearch PERSONAL_FACT_119", true), /PERSONAL_FACT_119/);
 });
 
 test("sharing e2e: screening off preserves carried skills without model calls", async (t) => {
-  const b = await fixture(t, { securityScreenBackend: "off" });
+  const b = await fixture(t, { securityScreen: "off" });
   await b.skill("personal:U1", "unscreened-helper", "SHARED_SKILL_OK");
   await assert.equal(
     await b.turn("!skill-run unscreened-helper python3 {dir}/scripts/value.py", true),
@@ -348,11 +436,12 @@ test("Open speaker keychain uses a disposable computer, follows the speaker, and
     signingSecret: "open-keychain-test-signing-key",
     apiBaseUrl: "http://core.test",
     maxAttempts: 1,
-    sharedOwnerAuthIsolation: false,
   });
   assert.ok(b.keychain);
+  const handles = new Map<string, string>();
   for (const id of ["U1", "U2"]) {
-    await b.keychain.save({ ownerId: id, service: "npm", secret: `npm_${id}`, envKey: "NPM_TOKEN" });
+    const credential = await b.keychain.save({ ownerId: id, service: "npm", secret: `npm_${id}`, envKey: "NPM_TOKEN" });
+    handles.set(id, credentialHandle(credential.id));
     await b.keychain.save({
       ownerId: id,
       service: "custom-cli",
@@ -370,12 +459,14 @@ test("Open speaker keychain uses a disposable computer, follows the speaker, and
   assert.ok(!prompt.includes("npm_U1"));
   await b.workspace.write("channel:C1", "room-only.txt", "room_data");
   const probe = `python3 -c 'import os,pathlib; p=pathlib.Path.home()/".custom-cli/auth"; print("|".join([os.getenv("NPM_TOKEN","unset"),os.getenv("VAULT_TOKEN_GMAIL_GOOGLEAPIS_COM","unset"),p.read_text() if p.exists() else "absent",os.getenv("AGENT_API_TOKEN","unset"),"room" if pathlib.Path("room-only.txt").exists() else "isolated"]))'`;
-  assert.equal(await b.turn(`!owner ${probe}`, true), "npm_U1|gmail_U1|file_U1|unset|isolated");
-  assert.equal(await b.turn(`!owner ${probe}`, true, "U2"), "npm_U2|gmail_U2|file_U2|unset|isolated");
+  const selected = (id = "U1") =>
+    `!execute ${JSON.stringify({ command: probe.replace('os.getenv("NPM_TOKEN","unset")', `str(os.getenv("NPM_TOKEN") == "npm_${id}")`).replace('os.getenv("VAULT_TOKEN_GMAIL_GOOGLEAPIS_COM","unset")', `str(os.getenv("VAULT_TOKEN_GMAIL_GOOGLEAPIS_COM") == "gmail_${id}")`), ownerAuth: true, credentials: [handles.get(id), "connector_gmail_googleapis_com_default"] })}`;
+  assert.equal(await b.turn(selected(), true), "True|True|file_U1|unset|isolated");
+  assert.equal(await b.turn(selected("U2"), true, "U2"), "True|True|file_U2|unset|isolated");
   for (const id of ["U1", "U2", "U1"]) {
     assert.equal(
-      await b.turn(`!owner ${probe}`, true, id, { origin: { kind: "ambient", live: true } }),
-      `npm_${id}|gmail_${id}|file_${id}|unset|isolated`,
+      await b.turn(selected(id), true, id, { origin: { kind: "ambient", live: true } }),
+      `True|True|file_${id}|unset|isolated`,
     );
   }
   const ambientPrompt = await b.turn("!sysprompt", true, "U2", { origin: { kind: "ambient", live: true } });
@@ -388,7 +479,7 @@ test("Open speaker keychain uses a disposable computer, follows the speaker, and
   ]);
   for (const origin of [{ kind: "human" }, { kind: "ambient", live: true }] as const) {
     assert.equal(
-      await b.turn(`!owner ${probe}`, true, "U1", {
+      await b.turn(selected(), true, "U1", {
         origin,
         conversation: {
           kind: "group",
@@ -398,7 +489,7 @@ test("Open speaker keychain uses a disposable computer, follows the speaker, and
           publishMembers: [{ externalId: "U1" }, { externalId: "U2" }],
         },
       }),
-      "npm_U1|gmail_U1|file_U1|unset|isolated",
+      "True|True|file_U1|unset|isolated",
     );
   }
   assert.deepEqual(await b.keychain.grantsForScope("group:G1"), []);
@@ -437,7 +528,30 @@ test("Open speaker keychain uses a disposable computer, follows the speaker, and
   await assert.rejects(denied({ kind: "automation" }), /owner-auth box is not available/);
   await assert.rejects(denied({ kind: "ambient" }), /owner-auth box is not available/);
   await assert.rejects(denied({ kind: "ambient", live: false }), /owner-auth box is not available/);
+  const firstTurn = (channelRef: string, origin: TurnRequest["origin"] = { kind: "human" }) =>
+    b.turn(selected(), true, "U1", {
+      origin,
+      conversation: {
+        kind: "channel",
+        channelRef,
+        threadRef: `${channelRef}:first-turn-${++deniedTurn}`,
+        audience: [{ externalId: "U1" }, { externalId: "U2" }],
+        publishMembers: [{ externalId: "U1" }, { externalId: "U2" }],
+      },
+    });
+  assert.equal(await firstTurn("C-unsynced"), "True|True|file_U1|unset|isolated");
+  assert.equal(await firstTurn("C-unsynced", { kind: "ambient", live: true }), "True|True|file_U1|unset|isolated");
   await b.remove("U1");
-  await assert.rejects(denied(), /owner-auth box is not available/);
-  await assert.rejects(denied({ kind: "ambient", live: true }), /owner-auth box is not available/);
+  const removed = (origin: TurnRequest["origin"] = { kind: "human" }) =>
+    b.turn("!owner true", true, "U1", {
+      origin,
+      conversation: {
+        kind: "channel",
+        channelRef: "C1",
+        threadRef: `C1:keychain-denied-${++deniedTurn}`,
+        audience: [{ externalId: "U1" }, { externalId: "slack-external", isExternalGuest: true }],
+      },
+    });
+  await assert.rejects(removed(), /non-internal participant/);
+  await assert.rejects(removed({ kind: "ambient", live: true }), /non-internal participant/);
 });
