@@ -142,8 +142,6 @@ export {
   recoveryVerifyOldest,
   statusPlaceholderKey,
   deliveryMetadata,
-  type DeliveryMetadata,
-  type PostedPart,
   type PostMessageArgs,
   SLACK_POST_SPLIT_LIMIT,
   SLACK_TEXT_LIMIT,
