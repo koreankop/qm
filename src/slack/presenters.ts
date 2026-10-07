@@ -1,4 +1,4 @@
-import { sleep } from "./util.ts";
+import { sleep } from "../util/async.ts";
 import { slackSectionBlocks } from "./mrkdwn.ts";
 import type { DeliveryMetadata } from "./delivery.ts";
 
