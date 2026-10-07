@@ -85,13 +85,13 @@ unchanged; swarms add no filesystem snapshots, immutable copies, or restores.
 Every swarm gets one shared board computer in the swarm scope, created with the
 first worker. `inspect` returns it as `board.sandboxId`, and every worker carries
 it as `forumSandboxId`; the root session and all workers reach it with
-`execute`'s `sandbox_id`. Board creation is part of each worker's provisioning and
+the `sandbox` tool's `sandbox_id`. Board creation is part of each worker's provisioning and
 fails that worker like any other provisioning failure. The board outlives worker
 cleanup so its files remain available to the root. To use an existing computer instead,
 supply `forumSandboxId` naming an authorized sandbox in the same scope; no board is
 then created. Every worker still gets its own blank private computer.
 The forum ID appears in peer metadata and the worker prompt; select it explicitly
-with `execute`'s `sandbox_id` for commands that should use the shared computer.
+with the `sandbox` tool's `sandbox_id` for commands that should use the shared computer.
 This is not a new filesystem synchronization feature. Workers using a forum share
 that disk and must coordinate concurrent writes themselves. Failed worker creation
 never retires the existing forum.

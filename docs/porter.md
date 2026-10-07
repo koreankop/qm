@@ -20,7 +20,8 @@ PORTER_SANDBOX_IMAGE=ghcr.io/porter-dev/qm-sandbox:latest
 PORTER_DEPLOY_RUNNER_IMAGE=ghcr.io/porter-dev/qm-app-runner:latest
 # PORTER_DEPLOY_URL=            # only when the API host is not https://dashboard.porter.run
 # PORTER_DEPLOY_APPS_DOMAIN=    # optional; puts apps on sandbox ingress (see below)
-# PORTER_DEPLOY_VISIBILITY=internal  # default: no ingress host, core reaches apps in-cluster;
+# PORTER_DEPLOY_VISIBILITY=internal  # default without PORTER_DEPLOY_APPS_DOMAIN: no ingress host, core reaches apps in-cluster
+                                     # (default is private when PORTER_DEPLOY_APPS_DOMAIN is set);
                                      # private/public put apps on sandbox ingress, and public
                                      # serves them to ANYONE with the URL, bypassing qm's gate
 ```

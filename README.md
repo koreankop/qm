@@ -89,7 +89,7 @@ on reload. Switch an existing instance with an explicit surface command.
 Every turn runs through a central core, which can use a variety of models and harnesses
 to generate the response. A Postgres persistence layer holds user data, session history,
 and other durable state. The agent has a small, fixed tool surface; one of those tools is
-`execute`, which runs commands in the scope's own isolated sandbox — its durable computer,
+`sandbox`, which runs commands in the scope's own isolated sandbox — its durable computer,
 where installed tools stay installed. The web UI and admin panel share one service; the portal and optional built-in
 auth broker share another. These modules communicate with core over its HTTP API.
 See [combined services](docs/combined-services.md) for configuration and migration;
@@ -112,8 +112,8 @@ agent acts as the person it's working for, with their credentials and permission
 everything it does is audited. An org picks one security posture, which narrower scopes
 can only tighten:
 
-- **Strict** — every harness tool call pauses for human approval, except the two
-  no-effect turn enders.
+- **Strict** — every harness tool call pauses for human approval, except the no-effect
+  `finish_silently` turn ender.
 - **Auto** (default) — blocks private-network access.
 - **Dangerous** — no tool approval gates, and content screening only observes.
 
@@ -142,7 +142,7 @@ Create an organization-owned deployment repository that depends on `@yc-software
 
 ```bash
 npm exec --yes --package=@yc-software/qm@latest -- \
-  qm init . --org <slug> --target <fly-or-aws>
+  qm init . --org <slug> --target <docker-fly-or-aws>
 npm install
 ```
 

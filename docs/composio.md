@@ -1,6 +1,6 @@
 # Composio through the QM backend
 
-QM discovers apps, creates consent links, and executes Composio tools through its authenticated backend. Agent code never receives the project API key. The composio skill calls `/v1/composio` through the existing execute tool, retaining its command-policy and approval gates.
+QM discovers apps, creates consent links, and executes Composio tools through its authenticated backend. Agent code never receives the project API key. The composio skill calls `/v1/composio` through the existing `sandbox` tool, retaining its command-policy and approval gates.
 
 ## Setup
 
@@ -16,7 +16,7 @@ The backend derives the Composio user ID from the organization and canonical QM 
 
 Tool discovery returns schemas; connection discovery returns account IDs and toolkit names, not credentials. Execution returns provider data and success/error status. Audit records contain the actor, scope, tool, account and execution stage without request arguments or response bodies. An uncertain execution failure is never retried automatically. Agent calls require the current running turn's lease; detached scripts cannot keep using this capability after the run ends.
 
-Calls run through the ordinary execute tool. Existing policies inspecting provider URLs or CLI syntax must be updated to recognize the new QM API calls; these are not a semantic per-provider operation approval system. Strict posture continues to block direct control-plane mutations.
+Calls run through the ordinary `sandbox` tool. Existing policies inspecting provider URLs or CLI syntax must be updated to recognize the new QM API calls; these are not a semantic per-provider operation approval system. Strict posture continues to block direct control-plane mutations.
 
 ## Browser callback verification
 
