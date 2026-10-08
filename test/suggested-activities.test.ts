@@ -195,9 +195,9 @@ test("guidance updates managed task text while preserving user edits", async () 
   await f.service.get("alice", []);
   await f.settle();
   const id = (await f.crons.list())[0]!.id;
-  const updated = createSuggestedActivityService({ ...f.deps, context: "YC founder guidance" });
+  const updated = createSuggestedActivityService({ ...f.deps, context: "Acme team guidance" });
   await updated.maintain();
-  assert.match((await f.crons.get(id))!.action!, /YC founder guidance/);
+  assert.match((await f.crons.get(id))!.action!, /Acme team guidance/);
   await f.crons.update(id, { action: "My custom research task" });
   await createSuggestedActivityService({ ...f.deps, context: "Changed guidance" }).maintain();
   assert.equal((await f.crons.get(id))!.action, "My custom research task");
@@ -233,6 +233,18 @@ test("old valid results are returned while a newer refresh is running", async ()
     status: "running",
   });
   assert.deepEqual(await f.service.get("alice", []), { activities, pending: true });
+});
+
+test("the newest valid run wins over older ones", async () => {
+  const f = fixture();
+  await f.service.get("alice", []);
+  await f.settle();
+  const newer = activities.map((activity) => ({ ...activity, title: `${activity.title} today` }));
+  f.output(JSON.stringify(newer));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await f.deps.scheduler.runNow((await f.crons.list())[0]!.id);
+  await f.settle();
+  assert.deepEqual(await f.service.get("alice", []), { activities: newer, pending: false });
 });
 
 test("fire results cannot point at another personal scope or an unrelated thread", async () => {

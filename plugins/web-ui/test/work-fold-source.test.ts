@@ -5,12 +5,23 @@ import test from "node:test";
 const chat = readFileSync(new URL("../src/chat.ts", import.meta.url), "utf8");
 const css = readFileSync(new URL("../src/shell.css", import.meta.url), "utf8");
 
-test("live and completed work share one chronological duration fold", () => {
-  assert.match(chat, /class=\$\{stopped \? "stopped-work" : `work work-fold work-\$\{work.status\}`\}/);
+test("live and completed work keep chronological folds split around steering", () => {
+  assert.match(chat, /class=\$\{stopped && last \? "stopped-work" : `work work-fold work-\$\{work.status\}`\}/);
   assert.match(chat, /messageWorkTimeline\(work, active \? "" : text\)/);
-  assert.match(chat, /let label = stopping \? "Stopping…" : workLabel\(work\)/);
-  assert.match(chat, /\?open=\$\{active \|\| !!work.pendingApprovals\?\.length\}/);
+  assert.match(chat, /let label = last \? workLabel\(work\) : "Worked"/);
+  assert.match(chat, /const animating = active && last && !stopping;/);
+  assert.match(chat, /sheenLabel\(label, animating\)/);
+  assert.match(chat, /\?open=\$\{last && \(active \|\| !!work.pendingApprovals\?\.length\)\}/);
   assert.doesNotMatch(chat, /function segmentSummaryLabel/);
+});
+
+test("the reply text is hidden only while the work fold is active, never for a finished-but-streaming turn", () => {
+  assert.match(
+    chat,
+    /const workActive =\s*hasWork && isStreaming && !streamingFinal && \(work\?\.status === "working" \|\| work\?\.status === "thinking"\);/,
+  );
+  assert.match(chat, /assistantDisplayText\(workActive \? "" : text, message\.stopReason\)/);
+  assert.doesNotMatch(chat, /isStreaming && hasWork && !streamingFinal \? ""/);
 });
 
 test("promoted speech keeps full reply styling", () => {
@@ -31,7 +42,10 @@ test("the fold chevron rotates when a work-fold is open", () => {
 test("expanded tool activity uses a compact log rhythm", () => {
   assert.match(css, /\.work-divider \{[\s\S]{0,120}?margin: 8px 0 10px;/);
   assert.match(css, /\.work-rows \{[\s\S]{0,120}?gap: 2px;/);
-  assert.match(css, /\.tool-row,[\s\S]{0,220}?font-size: 14px;[\s\S]{0,80}?line-height: 1\.35;/);
+  assert.match(
+    css,
+    /\.tool-row,[\s\S]{0,220}?font-size: max\(min\(12px, calc\(var\(--chat-font-size\) - 1px\)\), calc\(\(var\(--chat-font-size\) - 1px\) \* var\(--text-scale\)\)\);[\s\S]{0,80}?line-height: 1\.35;/,
+  );
   assert.match(css, /\.tool-row \.tool-summary \{[\s\S]{0,80}?min-height: 26px;/);
   assert.match(chat, /icon\(rowIcon, 15\)/);
   assert.match(chat, /icon\(Wrench, 13\)/);
@@ -62,7 +76,7 @@ test("thinking stays in sequence but is independently collapsible", () => {
 test("dense activity rows let their icons carry repeated type labels", () => {
   assert.match(chat, /thinkingPresentation\(/);
   assert.match(chat, /activityLabel\(row, status\)/);
-  assert.match(chat, />\$\{visible\}<\/span>/);
+  assert.match(chat, /sessionText \?\? visible\}<\/span>/);
   assert.doesNotMatch(chat, />Thinking\$\{preview/);
   assert.doesNotMatch(chat, />\$\{label\}\$\{detail/);
 });
@@ -78,14 +92,13 @@ test("stopped work shares posted reply rendering and shows one status without ac
   const block = chat.slice(chat.indexOf("  function workBlock("), chat.indexOf("  function approvalSummaryView("));
   assert.match(block, /postSpeechText\(item.row\)/);
   assert.match(block, /replies.map\(\(reply\) => html`<div class="streaming-text"/);
-  assert.match(block, /if \(stopped && fold === nothing\) fold = html`<div class="stopped-head">/);
+  assert.match(block, /if \(stopped && last && fold === nothing\) fold = html`<div class="stopped-head">/);
   assert.doesNotMatch(chat, /stopped-note|function stoppedWork/);
 });
 
 test("session rows preserve aggregate details and only render named target chips", () => {
-  assert.match(
-    chat,
-    /sessionView\?\.chipTitle \? subagentChip\(sessionView.chipTitle, sessionView.sessionId\) : nothing/,
-  );
+  assert.match(chat, /session && sessionView\?\.chipTitle \? html/);
+  assert.match(chat, /subagentChip\(sessionView.chipTitle, sessionView.sessionId\)/);
+  assert.match(chat, /\[session.label, sessionDetail\].filter\(Boolean\).join\(" "\)/);
   assert.match(chat, /const sessionDetail = \[sessionView\?\.detail, session\?\.preview\]/);
 });

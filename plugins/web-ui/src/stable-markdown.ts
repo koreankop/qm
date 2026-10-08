@@ -1,4 +1,5 @@
 import "./marked-dedupe.ts";
+import "./mermaid-block.ts";
 import { MarkdownBlock } from "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import "@mariozechner/mini-lit/dist/CodeBlock.js";
 import { ReactiveElement, render, type PropertyValues } from "lit";
@@ -55,7 +56,7 @@ export class StableMarkdown extends ReactiveElement {
           result.push(node as Text);
       } else if (
         node.nodeType !== Node.ELEMENT_NODE ||
-        !["code-block", "svg", "style", "script"].includes((node as Element).localName)
+        !["code-block", "qm-mermaid", "svg", "style", "script"].includes((node as Element).localName)
       )
         node.childNodes.forEach(visit);
     };
@@ -92,11 +93,14 @@ export class StableMarkdown extends ReactiveElement {
         ranges.push({ start: this.renderedText.length, end: text.length, active: true });
     } else this.clearFades();
     offset = 0;
+    let rangeIndex = 0;
     for (const node of nodes) {
       const end = offset + node.length;
       const fragments: Node[] = [];
       let consumed = 0;
-      for (const range of ranges) {
+      while (rangeIndex < ranges.length && ranges[rangeIndex]!.end <= offset) rangeIndex++;
+      for (let i = rangeIndex; i < ranges.length && ranges[i]!.start < end; i++) {
+        const range = ranges[i]!;
         const start = Math.max(offset, range.start) - offset;
         const stop = Math.min(end, range.end) - offset;
         if (stop <= start) continue;
@@ -154,13 +158,25 @@ export class StableMarkdown extends ReactiveElement {
       this.renderer.isThinking = this.isThinking;
       render(this.renderer.render(), this.staging);
       const target = this.staging.cloneNode(true) as HTMLElement;
+      for (const code of target.querySelectorAll("code-block")) {
+        if (code.getAttribute("language")?.toLowerCase() !== "mermaid") continue;
+        const diagram = document.createElement("qm-mermaid");
+        diagram.setAttribute(
+          "code",
+          new TextDecoder().decode(
+            Uint8Array.from(atob(code.getAttribute("code") ?? ""), (character) => character.charCodeAt(0)),
+          ),
+        );
+        if (this.isStreaming) diagram.setAttribute("pending", "");
+        code.replaceWith(diagram);
+      }
       const animate = this.isStreaming && !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
       this.prepareFades(target, animate);
       morphdom(this, target, {
         childrenOnly: true,
         onBeforeElUpdated: (current, next) => {
-          if (current.localName === "code-block") {
-            for (const name of ["code", "language"]) {
+          if (["code-block", "qm-mermaid"].includes(current.localName)) {
+            for (const name of ["code", "language", "pending"]) {
               const value = next.getAttribute(name);
               if (value !== current.getAttribute(name)) {
                 if (value === null) current.removeAttribute(name);

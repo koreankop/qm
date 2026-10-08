@@ -16,6 +16,7 @@ function fakeRes() {
   const out = { status: 0, body: undefined as unknown };
   return {
     res: {
+      getHeader() {},
       writeHead(status: number) {
         out.status = status;
         return this;
@@ -356,6 +357,18 @@ test("a playbook edit through PATCH versions the playbook", async () => {
   assert.equal(loop.playbook, "triage harder");
 });
 
+test("without the loop_triage flag, triage can be turned off but not on", async () => {
+  const deps = services();
+  const created = await call(deps, "POST", "/v1/loops", CREATE);
+  const id = (created.body as { loop: { id: string } }).loop.id;
+  const on = await call(deps, "PATCH", `/v1/loops/${id}`, { triage: { prioritize: { enabled: true } } });
+  assert.equal(on.status, 403);
+  const off = await call(deps, "PATCH", `/v1/loops/${id}`, { triage: { consolidate: { enabled: false } } });
+  assert.equal(off.status, 200);
+  const read = await call(deps, "GET", `/v1/loops/${id}`);
+  assert.equal((read.body as { triageAvailable: boolean }).triageAvailable, false);
+});
+
 test("deleting a loop deletes its child cron and grants", async () => {
   const deps = services();
   const created = await call(deps, "POST", "/v1/loops", { ...CREATE, schedule: { everyMs: 3_600_000 } });
@@ -388,6 +401,7 @@ test("decisions and grants require verified live-human evidence", async () => {
     sweepStale: async () => {},
     followUp: async () => null,
     itemAction: async () => ({ ok: true }),
+    previewTriage: async () => [],
   };
   const created = await call(deps, "POST", "/v1/loops", CREATE);
   const id = (created.body as { loop: { id: string } }).loop.id;
@@ -596,6 +610,7 @@ test("deciding an output ships or returns through the fire service", async () =>
     sweepStale: async () => {},
     followUp: async () => null,
     itemAction: async () => ({ ok: true }),
+    previewTriage: async () => [],
   };
   const created = await call(deps, "POST", "/v1/loops", CREATE);
   const id = (created.body as { loop: { id: string } }).loop.id;
@@ -617,6 +632,7 @@ test("deciding an output reports an active item decision lease", async () => {
     sweepStale: async () => {},
     followUp: async () => null,
     itemAction: async () => ({ ok: true }),
+    previewTriage: async () => [],
   };
   const created = await call(deps, "POST", "/v1/loops", CREATE);
   const loopId = (created.body as { loop: { id: string } }).loop.id;
@@ -786,4 +802,43 @@ test("a legacy inbox sync cron cannot be re-enabled through an autonomous Loop p
   assert.equal((await deps.crons!.get(cron.id))?.enabled, false);
   assert.equal((await call(deps, "PATCH", `/v1/loops/${loop.id}`, { state: "enabled" })).status, 200);
   assert.equal((await deps.crons!.get(cron.id))?.enabled, true);
+});
+
+test("loop icons can be set and reset by their owner, reject invalid input and retain authorization", async () => {
+  const deps = services();
+  const created = await call(deps, "POST", "/v1/loops", {
+    name: "Icons",
+    icon: "bug",
+    playbook: "Review",
+    successCondition: "Done",
+    shipActions: [],
+  });
+  assert.equal(created.status, 200);
+  const loop = (created.body as { loop: Loop }).loop;
+  assert.equal(loop.icon, "bug");
+  for (const icon of [
+    "rocket",
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=",
+    null,
+  ]) {
+    const result = await call(deps, "PATCH", `/v1/loops/${loop.id}`, { icon });
+    assert.equal(result.status, 200);
+    assert.equal((result.body as { loop: Loop }).loop.icon, icon ?? undefined);
+  }
+  for (const icon of ["", "<svg>", "x".repeat(49), 7, {}]) {
+    assert.equal((await call(deps, "PATCH", `/v1/loops/${loop.id}`, { icon })).status, 400);
+    assert.equal(
+      (
+        await call(deps, "POST", "/v1/loops", {
+          name: "Invalid",
+          icon,
+          playbook: "Review",
+          successCondition: "Done",
+          shipActions: [],
+        })
+      ).status,
+      400,
+    );
+  }
+  assert.equal((await call(deps, "PATCH", `/v1/loops/${loop.id}`, { icon: "shield" }, "mallory")).status, 403);
 });

@@ -1,5 +1,6 @@
 import { isPrincipalType, PRINCIPAL_TYPES, type PrincipalType } from "../../types.ts";
 import type { DirectoryMember } from "../../directory/directory-store.ts";
+import { canonicalPerson } from "../../directory/person.ts";
 import { sendJson } from "../http.ts";
 import { audit, isObj, orgScope } from "./shared.ts";
 import { type ApiCtx, type Route } from "./route.ts";
@@ -26,6 +27,14 @@ async function reactivatePrincipal(ctx: ApiCtx): Promise<void> {
   return sendJson(res, 200, { ok: true, principalId: id, active: true });
 }
 
+async function canonicalPrincipal(ctx: ApiCtx): Promise<void> {
+  const { res, deps } = ctx;
+  const id = ctx.params.id!;
+  if (!id) return sendJson(res, 404, { error: "not_found" });
+  await deps.identity?.refresh(true);
+  return sendJson(res, 200, { principalId: id, canonicalId: canonicalPerson(id) });
+}
+
 async function pushDirectory(ctx: ApiCtx): Promise<void> {
   const { res, app, body } = ctx;
   const b = body as {
@@ -40,12 +49,26 @@ async function pushDirectory(ctx: ApiCtx): Promise<void> {
     workspaceUrl?: unknown;
     membersSyncedAt?: unknown;
     channelsSyncedAt?: unknown;
+    partialChannels?: unknown;
     groupsSyncedAt?: unknown;
   };
   if (!Array.isArray(b.members) && !Array.isArray(b.channels) && !Array.isArray(b.groupMembers)) {
     return sendJson(res, 400, {
       error: "bad_request",
       message: "members[], channels[], and/or groupMembers[] required",
+    });
+  }
+  if (
+    b.partialChannels !== undefined &&
+    (typeof b.partialChannels !== "boolean" ||
+      (b.partialChannels &&
+        (!Array.isArray(b.channels) ||
+          !Array.isArray(b.channelMembers) ||
+          numOrUndef(b.channelsSyncedAt) === undefined)))
+  ) {
+    return sendJson(res, 400, {
+      error: "bad_request",
+      message: "partial channels require channels[], channelMembers[] and channelsSyncedAt",
     });
   }
   if (Array.isArray(b.members) && b.members.some((m) => isObj(m) && !isPrincipalType(m.type))) {
@@ -94,13 +117,15 @@ async function pushDirectory(ctx: ApiCtx): Promise<void> {
             isObj(m) && typeof m.channelId === "string" && typeof m.principalId === "string",
         )
       : undefined;
-    await app.upsertChannels(
+    const applied = await app.upsertChannels(
       channels,
       channelMembers,
       numOrUndef(b.channelsSyncedAt),
       channelRosterIds,
       channelRevocations,
+      b.partialChannels === true,
     );
+    if (b.partialChannels && !applied) return sendJson(res, 409, { error: "stale_directory_observation" });
     channelCount = channels.length;
   }
   let groupMemberCount: number | undefined;
@@ -156,6 +181,7 @@ async function channelMembership(ctx: ApiCtx): Promise<void> {
 export const directoryRoutes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "POST", path: "/v1/principals/:id/deactivate", auth: "source", handle: deactivatePrincipal },
   { method: "POST", path: "/v1/principals/:id/reactivate", auth: "source", handle: reactivatePrincipal },
+  { method: "GET", path: "/v1/principals/:id/canonical", auth: "source", handle: canonicalPrincipal },
   { method: "POST", path: "/v1/directory", auth: "source", handle: pushDirectory },
   { method: "GET", path: "/v1/directory/meta", auth: "source", handle: directoryMeta },
   {

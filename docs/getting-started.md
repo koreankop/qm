@@ -6,11 +6,11 @@ private repository:
 
 ```bash
 npm exec --yes --package=@yc-software/qm@latest -- \
-  qm init . --org <slug> --target <fly-or-aws>
+  qm init . --org <slug> --target <docker-fly-or-aws>
 npm install
 ```
 
-Choose Fly.io or AWS before initialization; the slug is a local name derived from the
+Choose Docker, Fly.io, or AWS before initialization; the slug is a local name derived from the
 organization, not globally unique. Customize config, tools, skills, and services in this
 directory. To change QM itself, use a public or private source fork and explicitly
 build its source, as described in [the README](../README.md#customize-your-instance).

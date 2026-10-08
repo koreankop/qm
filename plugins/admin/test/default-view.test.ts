@@ -54,7 +54,7 @@ test("admin shell groups control, logs, and artifacts like the reorganization", 
   assert.ok(sections);
   const actual = JSON.parse(JSON.stringify(vm.runInNewContext(sections)));
   assert.deepEqual(actual, [
-    { views: ["governance", "models", "credentials", "connectors", "slack-settings", "customize", "users"] },
+    { views: ["governance", "models", "credentials", "connectors", "slack-settings", "customize", "users", "spend"] },
     { label: "Logs", views: ["history", "slack", "judgments", "errors", "audit", "egress"] },
     { label: "Artifacts", views: ["files", "skills", "memory", "deployments", "crons"] },
     { views: ["design-system"] },
@@ -77,8 +77,13 @@ test("admin shell defaults bare admin URLs to org history", () => {
   assert.match(html, /let view = DEFAULT_VIEW;/);
   assert.match(
     html,
-    /let resolvedView = DEFAULT_VIEW;\s*if \(VIEWS\.includes\(v\)\) resolvedView = v;\s*else if \(session\) resolvedView = "history";[\s\S]*view: resolvedView/,
+    /let resolvedView = DEFAULT_VIEW;\s*if \(VIEWS\.includes\(v\) && \(v !== "design-system" \|\| permissions\.includes\("inbox"\)\)\) resolvedView = v;\s*else if \(session\) resolvedView = "history";[\s\S]*view: resolvedView/,
   );
+});
+
+test("the design system follows the inbox permission", () => {
+  assert.match(html, /if \(v === "design-system" && !permissions\.includes\("inbox"\)\) return;/);
+  assert.match(html, /permissions = Array\.isArray\(me\.data\.permissions\) \? me\.data\.permissions : \[\];/);
 });
 
 test("connector setup uses reactive forms with write-only Slack credentials", () => {
@@ -423,7 +428,7 @@ test("admin parity views expose the requested card groups and real navigation ac
     "Ambient reply policy",
     "Egress policy",
     "External Slack audience",
-    "Default runtime",
+    "Conversation runtime",
     "Custom providers",
     "Enabled models",
     "Organization SOUL",

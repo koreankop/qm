@@ -1,5 +1,5 @@
 import { EMOJI_NAME_BY_CHAR } from "./emoji-map.ts";
-import { sleep } from "./util.ts";
+import { sleep } from "../util/async.ts";
 import { extractDirectives } from "./directives.ts";
 import { slackErrorCode } from "./payloads.ts";
 

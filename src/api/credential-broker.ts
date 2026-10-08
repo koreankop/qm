@@ -1,3 +1,4 @@
+import { isComposioHost } from "../credentials/keychain.ts";
 import type { CapabilityClaims } from "../auth/capability-token.ts";
 import type { ScopeId } from "../types.ts";
 import type { CredentialUsageSink } from "../admin/credential-usage-sink.ts";
@@ -86,6 +87,36 @@ export function brokerCredentialAuthHeader(rec: DecryptedServiceCredential): [st
   return [injHeader, `${injScheme}${rec.secret}`];
 }
 
+type CredentialGrant =
+  | { rec: DecryptedServiceCredential }
+  | { rec?: undefined; status: number; code: string; message: string; host: string };
+
+export async function grantedCredential(
+  claims: CapabilityClaims,
+  slug: string,
+  reader: ServiceCredentialReader,
+  orgScopeId: ScopeId,
+): Promise<CredentialGrant> {
+  if (!Array.isArray(claims.credentials) || !claims.credentials.includes(slug))
+    return { status: 403, code: "not_entitled", message: "this session is not entitled to that credential", host: "" };
+  const rec = await reader.getServiceCredentialSecret(orgScopeId, slug);
+  if (!rec || !rec.enabled || rec.delivery === "env")
+    return {
+      status: 404,
+      code: "credential_unavailable",
+      message: "credential not found or disabled",
+      host: rec?.host ?? "",
+    };
+  if (claims.deployment && !rec.deployments)
+    return {
+      status: 403,
+      code: "not_available_to_deployments",
+      message: "this credential is switched off for published apps",
+      host: rec.host,
+    };
+  return { rec };
+}
+
 export async function brokerCredentialCall(opts: {
   claims: CapabilityClaims;
   body: BrokerRequest;
@@ -123,16 +154,9 @@ export async function brokerCredentialCall(opts: {
   if (!slug || !rawUrl) {
     return { status: 400, json: { error: "bad_request", message: "credential (slug) and url are required" } };
   }
-  if (!Array.isArray(claims.credentials) || !claims.credentials.includes(slug)) {
-    return deny(403, "not_entitled", "this session is not entitled to that credential", "");
-  }
-  const rec: DecryptedServiceCredential | null = await reader.getServiceCredentialSecret(orgScopeId, slug);
-  if (!rec || !rec.enabled || rec.delivery === "env") {
-    return deny(404, "credential_unavailable", "credential not found or disabled", rec?.host ?? "");
-  }
-  if (claims.deployment && !rec.deployments) {
-    return deny(403, "not_available_to_deployments", "this credential is switched off for published apps", rec.host);
-  }
+  const grant = await grantedCredential(claims, slug, reader, orgScopeId);
+  if (!grant.rec) return deny(grant.status, grant.code, grant.message, grant.host);
+  const { rec } = grant;
   if (credentialInjectionError(rec.injection)) {
     return deny(503, "invalid_injection", "credential injection configuration is invalid", rec.host);
   }
@@ -152,6 +176,8 @@ export async function brokerCredentialCall(opts: {
   } catch {
     return deny(400, "bad_url", "url is not a valid absolute URL", rec.host);
   }
+  if (isComposioHost(parsed.hostname))
+    return deny(403, "backend_only", "Composio calls must use the identity-bound /v1/composio API", rec.host);
   if (parsed.protocol !== "https:") return deny(403, "scheme_not_allowed", "only https targets are allowed", rec.host);
   if (
     rec.injection?.actor

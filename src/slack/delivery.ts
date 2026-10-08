@@ -1,6 +1,6 @@
 import { errMessage, swallowAs } from "../util/errors.ts";
 import { safeChunks, safeClip } from "./safe-cut.ts";
-import { sleep } from "./util.ts";
+import { sleep } from "../util/async.ts";
 import { isExternallyShared, isMpim, type ChannelMeta } from "./identity.ts";
 
 export interface SlackReplyArgs {
@@ -468,6 +468,10 @@ export async function findPostedByKey(
     cursor = page.response_metadata?.next_cursor?.trim() || undefined;
   } while (cursor);
   return undefined;
+}
+
+export function statusPlaceholderKey(runId: string): string {
+  return `status:run:${runId}`;
 }
 
 export function recoveryVerifyOldest(createdAt: number | undefined, editRef: string | undefined): string | undefined {

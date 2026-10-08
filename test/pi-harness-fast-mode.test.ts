@@ -3,14 +3,16 @@ import assert from "node:assert/strict";
 import {
   applyTurnEffort,
   applyFastSpeed,
+  applyThinkingBinding,
   piUsageToCallUsage,
   scaleCost,
-  withFastModeHeaders,
+  withRequestHeaders,
   FAST_COST_MULTIPLIER,
   modelSupportsFastMode,
   wantsFastMode,
   createPiHarness,
 } from "../src/harness/pi-harness.ts";
+import type { PiHarnessOptions } from "../src/harness/pi-harness.ts";
 import type { HarnessLlmRequestRecord, HarnessTurnInput } from "../src/harness/harness.ts";
 import type { NewEntry } from "../src/sessions/session-store.ts";
 import type { SessionEntry } from "../src/types.ts";
@@ -18,7 +20,7 @@ import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 import { defaultInteractiveThinkingLevel, getRequiredModel } from "../src/model/pi-models.ts";
 
 test("modelSupportsFastMode allows only the documented direct Opus ids", () => {
-  for (const id of ["claude-opus-5", "claude-opus-4-8"]) {
+  for (const id of ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"]) {
     assert.equal(modelSupportsFastMode(id), true, `${id} should support fast mode`);
   }
   for (const id of [
@@ -102,6 +104,10 @@ test("auto resets a reused Anthropic session to its interactive default", () => 
 });
 
 const ASTRA = getRequiredModel("gpt-6-astra", false) as Model<Api>;
+const SOL_61 = getRequiredModel("gpt-6.1-sol", false) as Model<Api>;
+const OPUS_55 = getRequiredModel("claude-opus-5-5", false);
+const SONNET_55 = getRequiredModel("claude-sonnet-5-5", false);
+const HAIKU_55 = getRequiredModel("claude-haiku-5-5", false);
 const OPUS = getRequiredModel("claude-opus-5", false) as Model<Api>;
 const ASTRA_TOKENS = { input: 10_000, output: 2_000, cacheRead: 50_000, cacheWrite: 4_000, totalTokens: 66_000 };
 
@@ -115,11 +121,36 @@ const pricingCases: Array<[string, Model<Api>, Partial<Usage>, number]> = [
   ["cache writes", ASTRA, { cacheWrite: 8_000 }, 0.1],
   ["high-input boundary", ASTRA, { input: 272_000 }, 2.72],
   ["high-input tier", ASTRA, { input: 300_000 }, 6],
+  ["GPT-6.1 Sol mixed tokens", SOL_61, ASTRA_TOKENS, 0.055],
+  ["GPT-6.1 Sol cache reads at 5% of input", SOL_61, { cacheRead: 100_000 }, 0.01],
+  ["GPT-6.1 Sol high-input tier", SOL_61, { input: 300_000 }, 1.2],
   [
     "mixed 1h writes",
     OPUS,
     { input: 10_000, output: 1_000, cacheRead: 40_000, cacheWrite: 16_000, cacheWrite1h: 8_000 },
     0.225,
+  ],
+  [
+    "Opus 5.5 mixed tokens and cache durations",
+    OPUS_55,
+    { input: 10_000, output: 1_000, cacheRead: 40_000, cacheWrite: 16_000, cacheWrite1h: 8_000 },
+    0.172,
+  ],
+  ["Opus 5.5 cache reads", OPUS_55, { cacheRead: 100_000 }, 0.02],
+  ["Opus 5.5 1h writes", OPUS_55, { cacheWrite: 4_000, cacheWrite1h: 4_000 }, 0.032],
+  ["Sonnet 5.5 1h writes", SONNET_55, { cacheWrite: 4_000, cacheWrite1h: 4_000 }, 0.016],
+  [
+    "Haiku 5.5 short prompt",
+    HAIKU_55,
+    { input: 10_000, output: 1_000, cacheRead: 40_000, cacheWrite: 16_000, cacheWrite1h: 8_000 },
+    0.0045,
+  ],
+  ["Haiku 5.5 prompt at the 100k boundary", HAIKU_55, { input: 100_000 }, 0.01],
+  [
+    "Haiku 5.5 long-prompt tier counts cached input",
+    HAIKU_55,
+    { input: 10_000, output: 1_000, cacheRead: 90_000, cacheWrite: 16_000, cacheWrite1h: 8_000 },
+    0.025,
   ],
   ["all 1h writes", OPUS, { cacheWrite: 4_000, cacheWrite1h: 4_000 }, 0.04],
   ["clamped 1h writes", OPUS, { cacheWrite: 4_000, cacheWrite1h: 40_000 }, 0.04],
@@ -155,17 +186,62 @@ test("normalization ignores provider pricing, preserves tokens and never mutates
   assert.deepEqual(ASTRA.cost, card);
 });
 
-test("fast headers preserve rates and existing beta headers", () => {
-  for (const model of [ASTRA, OPUS]) {
+const HAIKU = getRequiredModel("claude-haiku-4-5", false) as Model<Api>;
+const BINDING_BETA = "thinking-binding-controls-2026-08-01";
+
+test("request headers preserve rates and existing beta headers", () => {
+  for (const model of [ASTRA, OPUS, OPUS_55]) {
     const snapshot = structuredClone(model);
-    assert.deepEqual(withFastModeHeaders(model).cost, snapshot.cost);
+    assert.deepEqual(withRequestHeaders(model, true, true).cost, snapshot.cost);
     assert.deepEqual(model, snapshot);
   }
-  assert.equal(withFastModeHeaders(OPUS).headers?.["anthropic-beta"], "fast-mode-2026-02-01");
   assert.equal(
-    withFastModeHeaders({ ...OPUS, headers: { "anthropic-beta": "prior-beta" } }).headers?.["anthropic-beta"],
-    "prior-beta,fast-mode-2026-02-01",
+    withRequestHeaders(OPUS, true, true).headers?.["anthropic-beta"],
+    `${BINDING_BETA},fast-mode-2026-02-01`,
   );
+  assert.equal(
+    withRequestHeaders({ ...OPUS, headers: { "anthropic-beta": "prior-beta" } }, true, true).headers?.[
+      "anthropic-beta"
+    ],
+    `prior-beta,${BINDING_BETA},fast-mode-2026-02-01`,
+  );
+});
+
+test("direct adaptive-thinking Claude requests opt into thinking binding controls", () => {
+  assert.equal(withRequestHeaders(OPUS, true, false).headers?.["anthropic-beta"], BINDING_BETA);
+  assert.equal(withRequestHeaders(OPUS, false, true).headers?.["anthropic-beta"], undefined);
+  assert.equal(withRequestHeaders(ASTRA, true, false).headers?.["anthropic-beta"], undefined);
+  assert.equal(withRequestHeaders(HAIKU, true, false).headers?.["anthropic-beta"], undefined);
+  assert.equal(withRequestHeaders(HAIKU, true, true).headers?.["anthropic-beta"], "fast-mode-2026-02-01");
+});
+
+test("applyThinkingBinding sets drop_block only on requests that carry the beta header", () => {
+  const bound = withRequestHeaders(OPUS, true, true);
+  const adaptive = { thinking: { type: "adaptive", display: "summarized" } } as Record<string, unknown>;
+  assert.equal(applyThinkingBinding(adaptive, bound), adaptive);
+  assert.deepEqual(adaptive.thinking, {
+    type: "adaptive",
+    display: "summarized",
+    block_binding: { prefix_mismatch_behavior: "drop_block" },
+  });
+  const budget = { thinking: { type: "enabled", budget_tokens: 2048 } } as Record<string, unknown>;
+  applyThinkingBinding(budget, bound);
+  assert.deepEqual(budget.thinking, {
+    type: "enabled",
+    budget_tokens: 2048,
+    block_binding: { prefix_mismatch_behavior: "drop_block" },
+  });
+  const disabled = { thinking: { type: "disabled" } } as Record<string, unknown>;
+  applyThinkingBinding(disabled, bound);
+  assert.deepEqual(disabled.thinking, { type: "disabled" });
+  const unbound = { thinking: { type: "adaptive" } } as Record<string, unknown>;
+  applyThinkingBinding(unbound, OPUS);
+  applyThinkingBinding(unbound, withRequestHeaders(HAIKU, true, true));
+  assert.deepEqual(unbound.thinking, { type: "adaptive" });
+  const none = { messages: [] } as Record<string, unknown>;
+  applyThinkingBinding(none, bound);
+  assert.equal("thinking" in none, false);
+  assert.doesNotThrow(() => applyThinkingBinding(undefined, bound));
 });
 
 test("normalization handles absent usage, missing token fields and an unknown model", () => {
@@ -221,7 +297,7 @@ function responsesReply(text: string, usage: Record<string, unknown>, serviceTie
   ]);
 }
 
-function anthropicReply(text: string, usage: Record<string, unknown>): Response {
+function anthropicReply(text: string, usage: Record<string, unknown>, stopReason = "end_turn"): Response {
   return sse([
     {
       type: "message_start",
@@ -232,7 +308,7 @@ function anthropicReply(text: string, usage: Record<string, unknown>): Response 
     { type: "content_block_stop", index: 0 },
     {
       type: "message_delta",
-      delta: { stop_reason: "end_turn" },
+      delta: { stop_reason: stopReason },
       usage: { output_tokens: usage.output_tokens as number },
     },
     { type: "message_stop" },
@@ -258,9 +334,11 @@ async function runTurn(
   fastMode: boolean,
   respond: (payload: Record<string, unknown>, index: number) => Response,
   gateway = false,
-): Promise<{ rows: HarnessLlmRequestRecord[]; payloads: Array<Record<string, unknown>> }> {
+  extra: Partial<PiHarnessOptions> = {},
+): Promise<{ rows: HarnessLlmRequestRecord[]; payloads: Array<Record<string, unknown>>; betas: Array<string | null> }> {
   const rows: HarnessLlmRequestRecord[] = [];
   const payloads: Array<Record<string, unknown>> = [];
+  const betas: Array<string | null> = [];
   const harness = createPiHarness({
     apiKey: "sk-anthropic-test",
     openaiApiKey: "sk-openai-test",
@@ -270,15 +348,21 @@ async function runTurn(
             url: "https://gateway.example/v1",
             apiKey: "sk-gateway-test",
             apiKeyHeader: "x-gateway-key",
-            models: { "gpt-6-astra": "openai/gpt-6-astra" },
+            models: {
+              "gpt-6-astra": "openai/gpt-6-astra",
+              "gpt-6-astra-ultrafast": "openai/gpt-6-astra",
+              "claude-sonnet-5": "anthropic/claude-sonnet-5",
+            },
           },
         }
       : {}),
+    ...extra,
   });
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
     const payload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     payloads.push(payload);
+    betas.push(new Headers(init?.headers).get("anthropic-beta"));
     return respond(payload, payloads.length - 1);
   }) as typeof globalThis.fetch;
   let seq = 0;
@@ -302,7 +386,7 @@ async function runTurn(
   } finally {
     globalThis.fetch = realFetch;
   }
-  return { rows, payloads };
+  return { rows, payloads, betas };
 }
 
 for (const [name, gateway, fastMode, expected, echoedTier] of [
@@ -335,28 +419,37 @@ for (const [name, gateway, fastMode, expected, echoedTier] of [
 }
 
 test("an unsupported fast-mode request records the standard price", async () => {
-  const { rows, payloads } = await runTurn("sonnet-fast-ineligible", "claude-sonnet-5", true, () =>
+  const { rows, payloads, betas } = await runTurn("sonnet-fast-ineligible", "claude-sonnet-5", true, () =>
     anthropicReply("standard", ANTHROPIC_WIRE_USAGE),
   );
   assert.equal(payloads.length, 1);
   assert.equal("speed" in payloads[0]!, false);
+  assert.equal(betas[0], BINDING_BETA);
+  assert.deepEqual((payloads[0]!.thinking as { block_binding?: unknown }).block_binding, {
+    prefix_mismatch_behavior: "drop_block",
+  });
   assert.equal(rows.length, 1);
   assertUsd(rows[0]!.usage!.costUsd, 0.03);
+});
+
+test("gateway-routed Claude requests carry neither the binding beta nor block_binding", async () => {
+  const { payloads, betas } = await runTurn(
+    "sonnet-gateway-unbound",
+    "claude-sonnet-5",
+    false,
+    () => anthropicReply("routed", ANTHROPIC_WIRE_USAGE),
+    true,
+  );
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0]?.model, "anthropic/claude-sonnet-5");
+  assert.equal(betas[0]?.includes(BINDING_BETA) ?? false, false);
+  assert.equal("block_binding" in (payloads[0]!.thinking as object), false);
 });
 
 test("a refusal fallback prices each step on its actual model and tier", async () => {
   const { rows, payloads } = await runTurn("refusal-fallback-pricing", "claude-sonnet-5", true, (_payload, index) =>
     index === 0
-      ? new Response(
-          JSON.stringify({
-            type: "error",
-            error: {
-              type: "api_error",
-              message: "Output blocked by content filtering policy: this would violate Anthropic's usage policy.",
-            },
-          }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        )
+      ? anthropicReply("", ANTHROPIC_WIRE_USAGE, "refusal")
       : anthropicReply("recovered", ANTHROPIC_WIRE_USAGE),
   );
   assert.equal(payloads.length, 2);
@@ -371,6 +464,94 @@ test("a refusal fallback prices each step on its actual model and tier", async (
       [1, "claude-opus-5"],
     ],
   );
-  assertUsd(rows[0]!.usage!.costUsd, 0);
+  assertUsd(rows[0]!.usage!.costUsd, 0.03); // a stop_reason refusal is a billed 200 response
   assertUsd(rows[1]!.usage!.costUsd, 0.15);
+});
+
+for (const gateway of [true, false]) {
+  test(`Ultrafast prices a successful turn exactly once through ${gateway ? "gateway" : "direct"}`, async () => {
+    const { rows, payloads } = await runTurn(
+      `astra-ultrafast-${gateway}`,
+      "gpt-6-astra-ultrafast",
+      false,
+      () => responsesReply("done", ASTRA_WIRE_USAGE, "ultrafast"),
+      gateway,
+    );
+    assert.equal(payloads[0]?.model, gateway ? "openai/gpt-6-astra" : "gpt-6-astra");
+    assert.equal(payloads[0]?.service_tier, "ultrafast");
+    assert.equal(rows.length, 1);
+    assertUsd(rows[0]!.usage!.costUsd, 1.8);
+    assert.equal(rows[0]!.model, "gpt-6-astra-ultrafast");
+  });
+}
+
+test("a stop_reason refusal retries on the admin-configured fallback runtime", async () => {
+  const { payloads } = await runTurn(
+    "refusal-configured-fallback",
+    "claude-sonnet-5",
+    false,
+    (_payload, index) =>
+      index === 0 ? anthropicReply("", ANTHROPIC_WIRE_USAGE, "refusal") : responsesReply("recovered", ASTRA_WIRE_USAGE),
+    false,
+    { resolveFallbackRuntime: () => ({ modelId: "gpt-6-sol", effortLevel: "low" }) },
+  );
+  assert.equal(payloads.length, 2);
+  assert.equal(payloads[1]?.model, "gpt-6-sol");
+  assert.equal((payloads[1]?.reasoning as { effort?: string } | undefined)?.effort, "low");
+});
+
+test("an unavailable gateway model fails the turn without fallback (no structured signal)", async () => {
+  const outcome = await runTurn(
+    "unavailable-configured-fallback",
+    "claude-sonnet-5",
+    false,
+    () => responsesReply("recovered", ASTRA_WIRE_USAGE),
+    false,
+    {
+      modelGateway: {
+        url: "https://gateway.example/v1",
+        apiKey: "k",
+        apiKeyHeader: "x-k",
+        models: {},
+        reservedModelIds: new Set(["claude-sonnet-5"]),
+      },
+      resolveFallbackRuntime: () => ({ modelId: "gpt-6-sol", effortLevel: "low" }),
+    },
+  ).then(
+    ({ payloads }) => payloads,
+    () => [],
+  );
+  assert.deepEqual(outcome, []);
+});
+
+test("compaction retries a refused summary on the configured fallback model", async () => {
+  const harness = createPiHarness({
+    apiKey: "sk-anthropic-test",
+    openaiApiKey: "sk-openai-test",
+    modelId: "claude-sonnet-5",
+    resolveFallbackRuntime: () => ({ modelId: "gpt-6-sol" }),
+  });
+  const models: unknown[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const payload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    models.push(payload.model);
+    return models.length === 1
+      ? anthropicReply("", ANTHROPIC_WIRE_USAGE, "refusal")
+      : responsesReply("summary of the work", ASTRA_WIRE_USAGE);
+  }) as typeof globalThis.fetch;
+  try {
+    const text = await harness.models.compactHistory!({
+      session: { id: "compact-fallback" } as HarnessTurnInput["session"],
+      history: [
+        { seq: 1, kind: "user", payload: { text: "hello" }, createdAt: 1 },
+        { seq: 2, kind: "assistant", payload: { text: "hi" }, createdAt: 2 },
+      ] as unknown as SessionEntry[],
+      recordModelCall: () => {},
+    });
+    assert.match(text, /summary of the work/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepEqual(models, ["claude-sonnet-5", "gpt-6-sol"]);
 });

@@ -1,5 +1,5 @@
 export { isBoundaryRefusal, refusalDelivery, postThenAckRunDelivery, refusalNote } from "./refusals.ts";
-export { inlineCode, clip, sleep } from "./util.ts";
+export { inlineCode, clip } from "./util.ts";
 export { safeChunks } from "./safe-cut.ts";
 export {
   decodeSlackEntities,
@@ -140,9 +140,8 @@ export {
   postWithVerify,
   findPostedByKey,
   recoveryVerifyOldest,
+  statusPlaceholderKey,
   deliveryMetadata,
-  type DeliveryMetadata,
-  type PostedPart,
   type PostMessageArgs,
   SLACK_POST_SPLIT_LIMIT,
   SLACK_TEXT_LIMIT,

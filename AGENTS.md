@@ -1,5 +1,7 @@
 # qm
 
+**Read [`docs/SPEC.md`](./docs/SPEC.md) first.** It is the short source of truth for QM's north stars, subsystems and past mistakes. Where another doc disagrees, the spec wins.
+
 To run and test, see [`README.md`](./README.md).
 
 ## Working on the code
@@ -64,6 +66,17 @@ Two habits that keep task-focused changes from scarring the rest of the repo:
   Slack Mac app, and don't ask permission first — do it on your own; don't wait to be
   asked. Skip it for trivial refactors, docs, config, or pure-logic changes already
   covered by tests.
+  Leave review instances running until the PR merges, unless the user asks to stop
+  earlier. After merge, tear down that worktree's instance and verify its processes
+  and lease are gone before removing the worktree. Preserve shared Postgres and
+  persistent data. If the user asks to keep an instance beyond merge, keep its
+  worktree too.
+- **Keep screenshots out of Git and app assets.** Never commit screenshots or create
+  a tracked screenshots directory, including under docs or QA. Capture review images
+  in a temporary directory outside the checkout or an ignored local output directory,
+  and attach them to the PR or host them externally. Do not bundle review screenshots
+  into the app. Only actual product assets, such as icons and instructional media,
+  belong in the app bundle.
 - **Demo every front-end change in the PR.** Anything an operator or user sees
   rendered — admin/web/portal UI, Slack surfaces, emails — ships with a way for a
   reviewer to see the result without booting it. Prefer a link to a live demo app
@@ -71,7 +84,8 @@ Two habits that keep task-focused changes from scarring the rest of the repo:
   reviewer can click around the real thing; note in the PR what's mocked. Fall back
   to screenshots only when a live demo isn't practical (e.g. Slack surfaces, emails),
   and then show the after state (before/after for changes to something that existed),
-  rendered against realistic data.
+  rendered against realistic data. Attach or externally host these screenshots; never
+  commit them to satisfy this requirement.
 
 ## Deployment repositories and source forks
 
@@ -108,7 +122,7 @@ per-instance and wiped by every deploy. Anything an operator or the system reads
 later (audit, logs, resolved config, queued or in-flight work) must live in a durable
 store, never RAM alone. RAM-only is fine only as a cache in front of a durable store, or
 for genuinely disposable, re-derivable state. If you're adding a log, audit, queue, or
-resolved config, back it with Postgres; the spec's data-model & durability section tracks the gaps.
+resolved config, back it with Postgres; see the spec's “Free the brain” north star.
 
 > `CLAUDE.md` is a symlink to `AGENTS.md`, so every tool (Claude Code, Codex,
 > Cursor, …) reads the same guidance from this one file. If a tool-specific

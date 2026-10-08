@@ -56,7 +56,7 @@ async function buildEnv(): Promise<Env> {
     qaUserId: qaAuth.userId,
     teamId: qaAuth.teamId,
     anthropicApiKey: requireEnv("ANTHROPIC_API_KEY"),
-    judgeModel: process.env.LIVE_E2E_JUDGE_MODEL ?? "claude-haiku-4-5-20251001",
+    judgeModel: process.env.LIVE_E2E_JUDGE_MODEL ?? "claude-haiku-5-5",
     ...(process.env.LIVE_E2E_TARGET_CHANNEL ? { targetChannel: process.env.LIVE_E2E_TARGET_CHANNEL } : {}),
     sandbox:
       process.env.LIVE_E2E_SANDBOX_AVAILABLE === "1" ||
@@ -197,6 +197,16 @@ function selectScenarios(env: Env): { selected: Scenario[]; skipped: ScenarioRes
         attempts: 0,
         durationMs: 0,
         skipReason: "not a twin-backed run (needs ARGA_TWIN_ADMIN_URL)",
+      });
+      continue;
+    }
+    if (tags.includes("apps-gateway") && !(process.env.DEPLOY_APPS_DOMAIN && process.env.DEPLOY_APPS_SESSION_SECRET)) {
+      skipped.push({
+        name: s.name,
+        status: "skip",
+        attempts: 0,
+        durationMs: 0,
+        skipReason: "instance has no apps gateway (needs DEPLOY_APPS_DOMAIN + DEPLOY_APPS_SESSION_SECRET)",
       });
       continue;
     }

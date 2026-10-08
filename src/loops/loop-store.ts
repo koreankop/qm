@@ -4,6 +4,7 @@ import type {
   LoopGovernorConfig,
   LoopHealth,
   LoopState,
+  LoopTriageConfig,
   Destination,
   RecipientConsent,
   ShipActionPolicy,
@@ -20,6 +21,7 @@ import { hashId } from "../util/crypto.ts";
 
 export interface CreateLoopInput extends CreateTriggerInput {
   name: string;
+  icon?: string | null;
   surface?: string;
   sources?: string[];
   playbook: string;
@@ -36,6 +38,7 @@ export interface CreateLoopInput extends CreateTriggerInput {
 
 export interface LoopPatch {
   name?: string;
+  icon?: string | null;
   purpose?: string;
   successCondition?: string;
   successChecks?: string[];
@@ -44,6 +47,7 @@ export interface LoopPatch {
   shipActions?: ShipActionPolicy[];
   caps?: LoopCaps;
   governor?: LoopGovernorConfig;
+  triage?: LoopTriageConfig;
   cronId?: string;
   runAs?: Loop["runAs"];
   state?: LoopState;
@@ -78,6 +82,29 @@ export function isRunnable(loop: Loop): boolean {
   return RUNNABLE_STATES.has(loop.state);
 }
 
+export const LOOP_ICON_ERROR =
+  "icon must be a lowercase icon name, a PNG data URL up to 64 KiB and 128×128 pixels, or null for the default";
+
+export function validLoopIcon(value: unknown): value is string | null {
+  if (value === null) return true;
+  if (typeof value !== "string") return false;
+  if (value.length <= 48 && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(value)) return true;
+  if (value.length > 65_536 || !/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(value)) return false;
+  const encoded = value.slice("data:image/png;base64,".length);
+  const bytes = Buffer.from(encoded, "base64");
+  if (bytes.toString("base64") !== encoded || bytes.length < 33) return false;
+  if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return false;
+  if (bytes.readUInt32BE(8) !== 13 || bytes.toString("ascii", 12, 16) !== "IHDR") return false;
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  return width > 0 && height > 0 && width <= 128 && height <= 128;
+}
+
+function normalizeIcon(value: string | null): string | undefined {
+  if (!validLoopIcon(value)) throw new Error(LOOP_ICON_ERROR);
+  return value ?? undefined;
+}
+
 function normalizeName(name: string): string {
   const trimmed = name.trim().replace(/\s+/g, " ");
   if (!trimmed) throw new Error("a loop needs a name");
@@ -95,6 +122,17 @@ function normalizeShipActions(actions: ShipActionPolicy[] | undefined): ShipActi
 
 function stateFields(state: LoopState): Pick<Loop, "state" | "enabled"> {
   return { state, enabled: state === "enabled" };
+}
+
+function mergeTriage(current: LoopTriageConfig | undefined, patch: LoopTriageConfig): LoopTriageConfig {
+  const next: LoopTriageConfig = { ...current };
+  for (const key of ["prioritize", "consolidate"] as const) {
+    const change = patch[key];
+    if (!change) continue;
+    const { instructions, ...setting } = { ...current?.[key], ...change };
+    next[key] = { ...setting, ...(instructions ? { instructions } : {}) };
+  }
+  return next;
 }
 
 export function createLoopStore(backing: DurableMap<Loop> = createMemoryMap<Loop>()): LoopStore {
@@ -131,6 +169,7 @@ export function createLoopStore(backing: DurableMap<Loop> = createMemoryMap<Loop
         ...buildTriggerBase(input, contentId, now),
         ...stateFields("enabled"),
         name,
+        ...(input.icon !== undefined ? { icon: normalizeIcon(input.icon) } : {}),
         playbook: input.playbook,
         playbookVersion: 1,
         playbookHistory: [{ version: 1, at: now, by: input.createdBy }],
@@ -164,6 +203,7 @@ export function createLoopStore(backing: DurableMap<Loop> = createMemoryMap<Loop
         if (patch.restore !== undefined) return patch.restore;
         const fields: Partial<Loop> = {};
         let policyChanged = false;
+        if (patch.icon !== undefined) fields.icon = normalizeIcon(patch.icon);
         if (patch.name !== undefined) fields.name = normalizeName(patch.name);
         if (patch.purpose !== undefined) fields.purpose = patch.purpose;
         if (patch.successCondition !== undefined) fields.successCondition = patch.successCondition;
@@ -177,6 +217,7 @@ export function createLoopStore(backing: DurableMap<Loop> = createMemoryMap<Loop
         }
         if (patch.caps !== undefined) fields.caps = patch.caps;
         if (patch.governor !== undefined) fields.governor = patch.governor;
+        if (patch.triage !== undefined) fields.triage = mergeTriage(loop.triage, patch.triage);
         if (patch.cronId !== undefined) fields.cronId = patch.cronId;
         if (patch.runAs !== undefined) fields.runAs = patch.runAs;
         if (patch.state !== undefined) Object.assign(fields, stateFields(patch.state));

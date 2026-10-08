@@ -12,6 +12,7 @@ import { scopeId } from "../src/types.ts";
 import { mintCapabilityToken, EGRESS_PROXY_AUD } from "../src/auth/capability-token.ts";
 import { createMemoryAdvisoryLock } from "../src/persistence/advisory-lock.ts";
 import { installFakeAgent37, FAKE_AGENT37_API_KEY, type FakeAgent37 } from "./support/fake-agent37.ts";
+import { NonRetryableTurnError } from "../src/core/turn-error.ts";
 import type { Sandbox } from "../src/sandbox/sandbox.ts";
 
 let fake: FakeAgent37;
@@ -264,4 +265,104 @@ test("profile advertises resident disk and process sessions", () => {
   assert.equal(sandbox.profile.writablePersistence, "resident_disk");
   assert.equal(sandbox.profile.processSessions, true);
   assert.equal(sandbox.profile.egressEnforcement, "none");
+});
+
+test("instance create retries 429 refusals but not an ambiguous 5xx", async () => {
+  fake.failNext(429, {
+    headers: { "retry-after": "0" },
+    match: (c) => c.method === "POST" && c.path === "/v1/instances",
+  });
+  const h = await sandbox.provision(layers);
+  assert.equal(h.coldStart, true);
+  assert.equal(fake.calls.filter((c) => c.method === "POST" && c.path === "/v1/instances").length, 2);
+
+  const otherScope = scopeId("personal", "other");
+  fake.failNext(500, {
+    headers: { "x-request-id": "req-create" },
+    match: (c) => c.method === "POST" && c.path === "/v1/instances",
+  });
+  const posts = fake.calls.filter((c) => c.method === "POST" && c.path === "/v1/instances").length;
+  await assert.rejects(
+    sandbox.provision([{ scopeId: otherScope, mountPath: "/", mode: "rw" }]),
+    /agent37 create .*: http 500 .*\[request id req-create\]/,
+  );
+  assert.equal(fake.calls.filter((c) => c.method === "POST" && c.path === "/v1/instances").length, posts + 1);
+});
+
+for (const failure of ["disconnect", "503"]) {
+  test(`accepted create followed by ${failure} never duplicates the instance`, async () => {
+    let injected = false;
+    const adapter = make({
+      fetchImpl: async (input: string | URL | Request, init?: RequestInit) => {
+        const response = await fake.fetchImpl(input, init);
+        if (!injected && init?.method === "POST" && new URL(String(input)).pathname === "/v1/instances") {
+          injected = true;
+          if (failure === "disconnect") throw new TypeError("connection lost after create");
+          return new Response("upstream unavailable", { status: 503, headers: { "retry-after": "0" } });
+        }
+        return response;
+      },
+    });
+    await assert.rejects(adapter.provision(layers), /connection lost after create|http 503/);
+    assert.equal(fake.names().length, 1);
+    const recovered = await adapter.provision(layers);
+    assert.equal(fake.names().length, 1);
+    assert.equal((await adapter.run(recovered, "echo recovered")).stdout.trim(), "recovered");
+    assert.equal(fake.calls.filter((c) => c.method === "POST" && c.path === "/v1/instances").length, 1);
+  });
+}
+
+test("instance listing retries 429 with Retry-After; exec is never retried and names the request id", async () => {
+  fake.failNext(429, {
+    headers: { "retry-after": "0" },
+    match: (c) => c.method === "GET" && c.path === "/v1/instances",
+  });
+  const h = await sandbox.provision(layers);
+  assert.equal(fake.calls.filter((c) => c.method === "GET" && c.path === "/v1/instances").length, 2);
+
+  const before = fake.calls.filter((c) => c.path.endsWith("/exec")).length;
+  fake.failNext(502, { headers: { "x-request-id": "req-exec" }, match: (c) => c.path.endsWith("/exec") });
+  await assert.rejects(sandbox.run(h, "echo hi"), /agent37 exec .*: http 502 .*\[request id req-exec\]/);
+  assert.equal(fake.calls.filter((c) => c.path.endsWith("/exec")).length, before + 1);
+});
+
+test("a workspace refusal reaches the user; an unrecognised failure stays retryable", async () => {
+  const message =
+    "This instance costs $0.0070 per hour, metered per minute; creating it requires at least one day of " +
+    "balance ($0.17). Add balance to your workspace (a new workspace can add a card to unlock $5 of free " +
+    "credit) and try again.";
+  fake.failNext(402, {
+    body: JSON.stringify({ error: { code: "insufficient_balance", message } }),
+    match: (c) => c.method === "POST" && c.path === "/v1/instances",
+  });
+  await assert.rejects(sandbox.provision(layers), (e: Error) => {
+    assert.ok(e instanceof NonRetryableTurnError);
+    assert.match(e.message, /add a card to unlock \$5 of free credit/);
+    return true;
+  });
+
+  fake.failNext(402, {
+    body: JSON.stringify({ error: { code: "provisioning_failed", message: "Failed to create the instance." } }),
+    match: (c) => c.method === "POST" && c.path === "/v1/instances",
+  });
+  await assert.rejects(sandbox.provision(layers), (e: Error) => {
+    assert.ok(!(e instanceof NonRetryableTurnError));
+    assert.match(e.message, /agent37 create .*: http 402 /);
+    return true;
+  });
+});
+
+test("a refusal on exec parks the turn instead of failing it generically", async () => {
+  const h = await sandbox.provision(layers);
+  fake.failNext(402, {
+    body: JSON.stringify({
+      error: { code: "insufficient_balance", message: "This instance is suspended for non-payment." },
+    }),
+    match: (c) => c.path.endsWith("/exec"),
+  });
+  await assert.rejects(sandbox.run(h, "echo hi"), (e: Error) => {
+    assert.ok(e instanceof NonRetryableTurnError);
+    assert.match(e.message, /suspended for non-payment/);
+    return true;
+  });
 });

@@ -164,7 +164,7 @@ test("durable claim service failure cannot issue a session", async () => {
     assert.equal(response.status, 400);
     const html = await response.text();
     assert.match(html, /href="\/auth\/trusted\/login"/);
-    assert.equal(html.includes('href="/auth/login?provider=primary"'), preferenceEnabled);
+    assert.equal(html.includes('href="/auth/login?provider=primary"'), false);
     assert.ok(!response.headers.getSetCookie().some((cookie) => cookie.startsWith("portal_session=")));
   } finally {
     claimAvailable = true;
@@ -258,3 +258,19 @@ test(
     assert.equal(new URL(primary.headers.get("location")!).origin, "https://primary.example.test");
   },
 );
+
+test("trusted launch with a valid session returns to the app without another sign-in", async () => {
+  const login = await start();
+  const signedIn = await fetch(login.callback, { redirect: "manual", headers: { cookie: login.cookie } });
+  const session = signedIn.headers
+    .getSetCookie()
+    .find((cookie) => cookie.startsWith("portal_session="))!
+    .split(";")[0]!;
+  const relaunch = await fetch(`${base}/auth/trusted/login?returnTo=%2Fs%2Fabc`, {
+    redirect: "manual",
+    headers: { cookie: session },
+  });
+  assert.equal(relaunch.status, 302);
+  assert.equal(relaunch.headers.get("location"), "/s/abc");
+  assert.ok(!relaunch.headers.getSetCookie().some((cookie) => cookie.startsWith("portal_trusted_tmp=")));
+});

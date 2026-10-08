@@ -11,6 +11,8 @@ import { testConfig } from "./support/test-config.ts";
 for (const checkResult of ["passed", "failed", "missing"] as const) {
   test(`loop intake executes with granted credentials and ${checkResult} checks gate held outputs`, async () => {
     const built = buildApp(testConfig());
+    const computer = await built.sandboxResources.create("U1", "personal:U1", "sprites", "default");
+    await built.sandboxResources.setDefault("U1", "personal:U1", computer.id);
     const org = scopeId("org", "default-org");
     await built.serviceCreds.setServiceCredential(org, {
       slug: "error-source",
@@ -51,7 +53,13 @@ for (const checkResult of ["passed", "failed", "missing"] as const) {
           else if (stage === "work") command = "printf 'RCA and proposed fix' > loop-proposal.txt && printf prepared";
           else if (stage === "judge") command = `${check} && printf verified`;
           else command = "printf shipped";
-          const result = await built.app.turn({ ...req, text: `!run ${command}` });
+          const result = await built.app.turn({
+            ...req,
+            text:
+              stage === "intake"
+                ? `!execute ${JSON.stringify({ command, credentials: ["service_error-source"] })}`
+                : `!run ${command}`,
+          });
           assert.equal(result.status, "ok");
           if (stage === "intake") {
             assert.equal(result.reply, "source-readable");

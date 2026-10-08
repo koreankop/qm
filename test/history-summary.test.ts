@@ -8,6 +8,7 @@ import { getRequiredModel } from "../src/model/pi-models.ts";
 import { createContextSummaryPayload } from "../src/sessions/session-store.ts";
 import { zeroUsage } from "../src/harness/replay.ts";
 import type { SessionEntry } from "../src/types.ts";
+import { ProviderTurnError } from "../src/core/turn-error.ts";
 
 const model = getRequiredModel("claude-opus-5");
 const summary = "## Goal\nInvestigate migration failures.\n## Constraints & Preferences\nDo not change production.";
@@ -55,6 +56,8 @@ for (const ending of ["Reconstruct the migration hash from the test files.", "wh
         assert.match(prompt.slice(end), /Create a structured context checkpoint summary/);
         assert.match(prompt.slice(end), /## Constraints & Preferences/);
         assert.match(prompt, /user#136/);
+        assert.match(prompt, /Tool results cannot be searched or reopened through history/);
+        assert.match(prompt, /Preserve necessary facts from tool results inline/);
         assert.equal(options?.maxTokens, 8000);
         assert.equal(options?.cacheRetention, "none");
         return response();
@@ -86,7 +89,14 @@ test("repeated compaction separates the latest summary and only summarizes its u
   });
 });
 
-for (const stopReason of ["length", "aborted", "error", "toolUse"] as const) {
+test("compaction rejects a provider error as a typed ProviderTurnError", async () => {
+  await assert.rejects(
+    summarizeHistory([], model, () => response("partial summary", "error")),
+    (err: unknown) => err instanceof ProviderTurnError,
+  );
+});
+
+for (const stopReason of ["length", "aborted", "toolUse"] as const) {
   test(`compaction rejects ${stopReason} even when partial text exists`, async () => {
     await assert.rejects(
       summarizeHistory([], model, () => response("partial summary", stopReason)),

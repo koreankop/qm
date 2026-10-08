@@ -13,6 +13,7 @@ import { supportsBlobStaging, supportsProcessSessions } from "../src/sandbox/san
 import { createMemoryMap, type DurableMap } from "../src/persistence/durable-map.ts";
 import { createMemoryBlobTransferStore } from "../src/persistence/blob-transfer.ts";
 import { scopeId } from "../src/types.ts";
+import { orgId } from "../src/config.ts";
 import { mintCapabilityToken, EGRESS_PROXY_AUD } from "../src/auth/capability-token.ts";
 import { installFakeModal, type FakeModal } from "./support/fake-modal.ts";
 import { ModalSandboxGoneError, type ModalClient } from "../src/sandbox/modal-client.ts";
@@ -321,6 +322,7 @@ test("profile advertises snapshot persistence and process sessions", () => {
   assert.equal(sandbox.profile.writablePersistence, "snapshot_to_workspace");
   assert.equal(sandbox.profile.processSessions, true);
   assert.equal(sandbox.profile.egressEnforcement, "none");
+  assert.equal(make({ egressProxyUrl: "https://proxy.example.com" }).profile.egressEnforcement, "domain");
 });
 
 test("file reads and writes revive a sandbox that died mid-turn", async () => {
@@ -411,27 +413,6 @@ test("stageIn pulls a blob into the guest atomically (temp then mv)", async () =
   assert.match(script, /-o .*\.part/, "downloads to a temp file");
   assert.match(script, /mv -f /, "and only then moves it into place");
   assert.match(script, /curl -fsS/, "-f so an HTTP error fails loudly instead of writing the error body");
-});
-
-test("adoptHomeSnapshot promotes a staged blob to the snapshot store and resets the scope's sandbox", async () => {
-  const { Readable } = await import("node:stream");
-  const { makeTar } = await import("../src/sandbox/tar.ts");
-  const blobs = createMemoryBlobTransferStore();
-  const s = make({ blobTransfer: blobs, capabilitySecret: "blob-secret", apiBaseUrl: "http://core.internal:8080" });
-
-  const a = await s.provision(layers);
-  await s.writeFile(a, "old.txt", "stale e2b-era sandbox\n");
-  await s.teardown(a, { keepWarm: true });
-
-  const tar = await makeTar([{ path: "migrated.txt", data: Buffer.from("came from e2b\n") }]);
-  const { blobId } = await blobs.put(Readable.from([Buffer.from(tar)]));
-  assert.ok(s.adoptHomeSnapshot);
-  await s.adoptHomeSnapshot!(scope, blobId);
-
-  const b = await s.provision(layers);
-  const migrated = await s.run(b, "cat ~/migrated.txt");
-  assert.equal(migrated.stdout, "came from e2b\n", "hydrates from the adopted snapshot");
-  assert.notEqual((await s.run(b, "cat ~/old.txt")).code, 0, "the pre-adopt sandbox was discarded, not reused");
 });
 
 test("persistHomeSnapshot writes the live home to the snapshot store on demand", async () => {
@@ -1034,4 +1015,126 @@ test("deep idle termination excludes writes from another core until recovery", {
   }
   assert.equal(await second.readFile(two, "after-checkpoint.txt"), "must survive");
   assert.equal(fake.createdCount(scopeName()), 2);
+});
+
+test("turn env reaches commands through the exec env parameter, never as inlined exports", async () => {
+  const h = await sandbox.provision(layers, { env: { MY_TOKEN: "hunter2" } });
+  const r = await sandbox.run(h, "echo TOKEN=$MY_TOKEN");
+  assert.match(r.stdout, /TOKEN=hunter2/);
+  assert.ok(!fake.execScripts().some((script) => script.includes("hunter2")));
+});
+
+test("scope and scratch sandboxes carry ownership tags", async () => {
+  const h = await sandbox.provision(layers);
+  assert.deepEqual(fake.tagsOf(fake.current(h.id)!.sandboxId), {
+    "qm-org": orgId(),
+    "qm-prefix": "qmt",
+    "qm-kind": "scope",
+  });
+  const scratch = await sandbox.provision(layers, { scratch: { key: "worker-1" } });
+  const scratchIds: string[] = [];
+  for await (const id of fake.client.listRunning!({ "qm-kind": "scratch" })) scratchIds.push(id);
+  assert.equal(scratchIds.length, 1);
+  assert.deepEqual(fake.tagsOf(scratchIds[0]!), { "qm-org": orgId(), "qm-prefix": "qmt", "qm-kind": "scratch" });
+  await sandbox.teardown(scratch);
+});
+
+test("a near-expiry checkpoint of a reaped scope is renewed before Modal deletes it", async () => {
+  fake.cleanup();
+  fake = installFakeModal({ native: true });
+  const store = createMemoryMap<StoredModalSandbox>();
+  const s = make({ store });
+  const handle = await s.provision(layers);
+  await s.writeFile(handle, "work.txt", "idle for a month");
+  await store.merge(scope, { lastActivityMs: 1 });
+  assert.equal((await s.reapDeepIdle!(1)).reaped, 1);
+  const parked = (await store.get(scope))!;
+  assert.ok(parked.nativeSnapshotId);
+  const day = 24 * 3600_000;
+  await store.merge(scope, { nativeSnapshotExpiresAtMs: Date.now() + 20 * day, lastSnapshotMs: Date.now() - 10 * day });
+  await s.reapDeepIdle!(1);
+  assert.equal((await store.get(scope))!.nativeSnapshotId, parked.nativeSnapshotId, "far from expiry: untouched");
+  await store.merge(scope, { nativeSnapshotExpiresAtMs: Date.now() + 3600_000, lastSnapshotMs: Date.now() - 29 * day });
+  await s.reapDeepIdle!(1);
+  const renewed = (await store.get(scope))!;
+  assert.notEqual(renewed.nativeSnapshotId, parked.nativeSnapshotId);
+  assert.ok(renewed.nativeSnapshotExpiresAtMs! > Date.now() + 29 * day);
+  assert.equal(renewed.lastActivityMs, 1, "renewal is maintenance, not user activity");
+  assert.equal(renewed.hydrationPending, false);
+  assert.equal(fake.current(scopeName()), null, "the renewal sandbox is terminated again");
+  assert.equal(fake.runningCount(), 0);
+  const restarted = make({ store });
+  const restored = await restarted.provision(layers);
+  assert.equal(await restarted.readFile(restored, "work.txt"), "idle for a month");
+});
+
+test("checkpoint renewal skips expired and short-lived checkpoints instead of looping", async () => {
+  fake.cleanup();
+  fake = installFakeModal({ native: true });
+  const store = createMemoryMap<StoredModalSandbox>();
+  const s = make({ store });
+  await s.provision(layers);
+  await store.merge(scope, { lastActivityMs: 1 });
+  await s.reapDeepIdle!(1);
+  const parked = (await store.get(scope))!;
+  await store.merge(scope, { nativeSnapshotExpiresAtMs: Date.now() + 40_000, lastSnapshotMs: Date.now() - 20_000 });
+  await s.reapDeepIdle!(1);
+  assert.equal((await store.get(scope))!.nativeSnapshotId, parked.nativeSnapshotId, "still in the first half-life");
+  await store.merge(scope, { nativeSnapshotExpiresAtMs: 1 });
+  await s.reapDeepIdle!(1);
+  assert.equal((await store.get(scope))!.nativeSnapshotId, parked.nativeSnapshotId, "expired: nothing to renew");
+  assert.equal(fake.createdCount(scopeName()), 1);
+});
+
+test("a sandbox approaching Modal's lifetime limit is checkpointed and retired even while busy", async () => {
+  fake.cleanup();
+  fake = installFakeModal({ native: true });
+  const store = createMemoryMap<StoredModalSandbox>();
+  const s = make({ store, client: { ...fake.client, lifetimeMs: 24 * 3600_000 } });
+  const handle = await s.provision(layers);
+  await s.writeFile(handle, "job.txt", "in flight");
+  assert.ok(supportsProcessSessions(s));
+  if (!supportsProcessSessions(s)) return;
+  await s.startProcess(handle, "sleep 30");
+  assert.equal((await s.reapDeepIdle!(72 * 3600_000)).reaped, 0, "a fresh busy sandbox is left alone");
+  await store.merge(scope, { expiresAtMs: Date.now() + 60_000 });
+  assert.equal((await s.reapDeepIdle!(72 * 3600_000)).reaped, 1);
+  assert.equal(fake.current(scopeName()), null);
+  assert.ok((await store.get(scope))!.nativeSnapshotId);
+  const next = await s.provision(layers);
+  assert.equal(await s.readFile(next, "job.txt"), "in flight");
+  assert.ok((await store.get(scope))!.expiresAtMs! > Date.now() + 23 * 3600_000);
+});
+
+test("untracked scope sandboxes are terminated after a grace period while scratch and other deployments are kept", async () => {
+  const store = createMemoryMap<StoredModalSandbox>();
+  const s = make({ store, orphanGraceMs: 40 });
+  const handle = await s.provision(layers);
+  const tracked = fake.current(handle.id)!.sandboxId;
+  const orphan = fake.createUntracked({ "qm-org": orgId(), "qm-prefix": "qmt", "qm-kind": "scope" });
+  const scratch = fake.createUntracked({ "qm-org": orgId(), "qm-prefix": "qmt", "qm-kind": "scratch" });
+  const foreign = fake.createUntracked({ "qm-org": orgId(), "qm-prefix": "other", "qm-kind": "scope" });
+  assert.equal((await s.reapDeepIdle!(72 * 3600_000)).reaped, 0, "first sighting starts the grace period");
+  assert.equal(fake.runningCount(), 4);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal((await s.reapDeepIdle!(72 * 3600_000)).reaped, 1);
+  const running = new Set<string>();
+  for await (const id of fake.client.listRunning!({})) running.add(id);
+  assert.deepEqual(running, new Set([tracked, scratch, foreign]));
+  assert.equal(running.has(orphan), false);
+});
+
+test("forced scratch destruction surfaces failure and retries the same live session", async () => {
+  const handle = await sandbox.provision(layers, { scratch: { key: "destroy-retry" } });
+  fake.failTerminateOnce();
+  await assert.rejects(sandbox.teardown(handle, { destroy: true }));
+  assert.equal(fake.runningCount(), 1);
+  await sandbox.teardown(handle, { destroy: true });
+  assert.equal(fake.runningCount(), 0);
+});
+
+test("released scratch handles cannot recreate a persistent sandbox", async () => {
+  const handle = await sandbox.provision(layers, { scratch: { key: "released-handle" } });
+  await sandbox.teardown(handle, { destroy: true });
+  await assert.rejects(sandbox.run(handle, "true"), /handle has been released/);
 });

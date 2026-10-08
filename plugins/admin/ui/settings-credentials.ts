@@ -173,7 +173,6 @@ export class CredentialState {
     if (body.delivery === "env") {
       if (!body.envKey) return "Env delivery needs an env var name.";
       if (!/^[A-Z][A-Z0-9_]*$/.test(body.envKey)) return "Env var must be UPPER_SNAKE_CASE.";
-      if (body.envKey.startsWith("AGENT_")) return "AGENT_* env vars are reserved for the platform.";
     } else if (!body.host) return "Host is required.";
     if (body.delivery !== "env" && !this.draft.org && !body.grantees.length)
       return "Add at least one person or choose org-wide access.";

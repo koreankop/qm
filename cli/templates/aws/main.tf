@@ -443,7 +443,7 @@ resource "aws_iam_role_policy" "github_deploy" {
       {
         Sid      = "InspectDeploymentCanaries"
         Effect   = "Allow"
-        Action   = ["ecs:DescribeTasks", "ecs:GetTaskProtection"]
+        Action   = ["ecs:DescribeTasks"]
         Resource = ["arn:aws:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:task/${var.cluster_name}/*"]
       },
       {
@@ -610,7 +610,7 @@ resource "aws_db_instance" "this" {
   identifier                = "${var.cluster_name}-core"
   engine                    = "postgres"
   engine_version            = "16"
-  instance_class            = "db.t4g.small"
+  instance_class            = var.db_instance_class
   allocated_storage         = 20
   db_name                   = var.db_name
   username                  = var.db_username
@@ -730,7 +730,7 @@ resource "aws_iam_role_policy" "task_objects" {
       },
       {
         Effect   = "Allow"
-        Action   = ["ecs:GetTaskProtection", "ecs:UpdateTaskProtection", "ecs:DescribeTasks"]
+        Action   = ["ecs:DescribeTasks"]
         Resource = "arn:aws:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:task/${var.cluster_name}/*"
       },
       {

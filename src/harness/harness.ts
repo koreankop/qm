@@ -1,6 +1,15 @@
+import type { ResumableToolCall } from "../core/turn-resume.ts";
 import type { DocumentInput } from "../core/document-inputs.ts";
-import type { RuntimeControl, RuntimeHandoff } from "./runtime-types.ts";
-import type { AttachmentMeta, ConversationTurn, ScopeId, Session, SessionEntry, TurnRequest } from "../types.ts";
+import type { RuntimeControl, HarnessHandoff } from "./runtime-types.ts";
+import type {
+  AttachmentMeta,
+  ClientToolDeclaration,
+  ConversationTurn,
+  ScopeId,
+  Session,
+  SessionEntry,
+  TurnRequest,
+} from "../types.ts";
 import type { HarnessId } from "../model/pi-models.ts";
 import type {
   GapPhases,
@@ -13,6 +22,7 @@ import type {
 } from "../sessions/session-store.ts";
 export type { GapWork } from "../sessions/session-store.ts";
 import type { OverheardEntryPayload } from "./replay.ts";
+import type { GoalRecord } from "./goal.ts";
 import type { ProviderKeys } from "./pi-harness.ts";
 import type { ToolContext } from "../tools/primitives.ts";
 import type { SecurityScreenVerdict, ToolResultScreen, ToolResultScreenInput } from "../security/security-posture.ts";
@@ -93,6 +103,8 @@ export interface HarnessTurnInput {
   session: Session;
   runId?: string;
   cancel?: AbortSignal;
+  continueTurn?: boolean;
+  shutdown?: AbortSignal;
   input: string;
   triggerTs?: string;
   entryTs?: string;
@@ -107,17 +119,20 @@ export interface HarnessTurnInput {
   ): Promise<{ text: string; attachments?: AttachmentMeta[]; images?: HarnessImage[]; documents?: DocumentInput[] }>;
   documents?: DocumentInput[];
   runtime?: Partial<RuntimeChoice>;
+  runtimePurpose?: import("../resolution/config-store.ts").RuntimePurpose;
   runtimeControl?: RuntimeControl;
   runtimeActorId?: string;
   readOnly?: boolean;
   surfaceTools?: boolean;
+  delegateWork?: boolean;
   surfaceName?: string;
+  clientTools?: readonly ClientToolDeclaration[];
   pollFire?: boolean;
   turnWallClockMs?: number;
   systemPrompt: string;
   history: SessionEntry[];
+  goal?: GoalRecord | null;
   tools: ToolContext;
-  credentialExecServices?: readonly { service: string; binary: string }[];
   commandCredentialHandles?: readonly string[];
   toolApprovalGate?(tool: string): boolean;
   emit(entry: NewEntry): Promise<SessionEntry>;
@@ -125,6 +140,7 @@ export interface HarnessTurnInput {
   tapeRows?: TapeRecord[];
   tapeMode?: "shadow" | "serve";
   tapeFold?: unknown[];
+  resumeToolCall?: ResumableToolCall;
   scopeLabel: ScopeId;
   orgScopeId: ScopeId;
   providerKeys?: ProviderKeys;
@@ -139,13 +155,15 @@ export interface HarnessTurnInput {
   onTextBlockStart?(phase?: "commentary" | "final_answer"): void | Promise<void>;
   onToolCallStart?(name: string): void;
   screenToolResult?(input: ToolResultScreenInput): Promise<ToolResultScreen>;
+  verifyGoal?: import("./goal.ts").GoalVerifier;
 }
 
 export interface HarnessTurnResult {
-  runtimeHandoff?: RuntimeHandoff;
+  runtimeHandoff?: HarnessHandoff;
   reply: string;
   silent?: boolean;
   stopped?: true;
+  stoppedByUser?: true;
   stoppedTapeComplete?: true;
   pendingApprovals?: Array<{
     command: string;
@@ -154,6 +172,7 @@ export interface HarnessTurnResult {
     matched?: string;
     purpose?: string;
     approvalKey?: string;
+    grantModes?: { session: boolean; always: boolean };
   }>;
   pausedOnApproval?: boolean;
   modelCalls?: number;
@@ -205,7 +224,14 @@ export interface HarnessModelUtilities {
 type HarnessControlTransport = "mock" | "in-process" | "sdk" | "http" | "json-rpc" | "api";
 type HarnessToolTransport = "mock" | "in-process" | "plugin" | "dynamic" | "in-process-mcp" | "mcp";
 type HarnessCapability =
-  "abort" | "steer" | "images" | "thinking-level" | "fast-mode" | "provider-sessions" | "native-tape";
+  | "abort"
+  | "steer"
+  | "images"
+  | "thinking-level"
+  | "fast-mode"
+  | "provider-sessions"
+  | "native-tape"
+  | "goal-enforcement";
 
 export interface HarnessAdapterProfile {
   id: string;

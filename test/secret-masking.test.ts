@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createSecretValueMasker } from "../src/security/secret-masking.ts";
+import {
+  createSecretValueMasker,
+  createExactSecretValueMasker,
+  MaskedExecutionError,
+  executionSecretEnv,
+} from "../src/security/secret-masking.ts";
 
 const SECRET = "ghp_secretvalue12345";
 
@@ -63,4 +68,46 @@ test("a JWT-shaped (base64url) form of a secret is masked", () => {
     mask(`curl -H "authorization: Bearer ${b64url}"`),
     'curl -H "authorization: Bearer <redacted:VAULT_PASS>"',
   );
+});
+
+test("exact masking preserves surrounding output, handles overlapping values and short secrets once", () => {
+  const mask = createExactSecretValueMasker(["a+b", "a", "", "a+b", "<redacted:credential>"]);
+  assert.equal(mask("prefix a+b a suffix"), "prefix <redacted:credential> <redacted:credential> suffix");
+  assert.equal(createExactSecretValueMasker([])("safe"), "safe");
+  assert.equal(createExactSecretValueMasker(["secret"])("c2VjcmV0"), "c2VjcmV0");
+});
+
+test("explicit secret fields override configuration names while public fields stay public", () => {
+  const env = { AWS_REGION: "credential", USERNAME: "a", PASSWORD: "short", TOKEN: "" };
+  const secrets = executionSecretEnv(env, [
+    { key: "AWS_REGION", value: "credential", secret: true },
+    { key: "USERNAME", value: "a", secret: false },
+    { key: "UNRELATED", value: "other", secret: true },
+  ]);
+  assert.deepEqual(secrets, { AWS_REGION: "credential", PASSWORD: "short", TOKEN: "" });
+  assert.equal(createExactSecretValueMasker(Object.values(secrets))("safe unrelated data"), "safe unrelated data");
+  assert.equal(createExactSecretValueMasker(Object.values(secrets))("credential"), "<redacted:credential>");
+  const mask = createExactSecretValueMasker(Object.values(executionSecretEnv({ AWS_REGION: "us-west-2", TOKEN: "" })));
+  assert.equal(mask("us-west-2"), "us-west-2");
+});
+
+test("conflicting public metadata cannot exempt an explicitly secret value", () => {
+  assert.deepEqual(
+    executionSecretEnv({ TOKEN: "protected" }, [
+      { key: "TOKEN", value: "protected", secret: true },
+      { key: "TOKEN", value: "protected", secret: false },
+    ]),
+    { TOKEN: "protected" },
+  );
+});
+
+test("MaskedExecutionError keeps the original error class, code and masked stack", () => {
+  const mask = createExactSecretValueMasker(["s3cr3t-value"]);
+  const original = Object.assign(new TypeError("connect failed for s3cr3t-value"), { code: "ECONNRESET" });
+  const masked = new MaskedExecutionError(original, mask, mask(original.message));
+  assert.equal(masked.message, "connect failed for <redacted:credential>");
+  assert.equal(masked.name, "TypeError");
+  assert.equal(masked.code, "ECONNRESET");
+  assert.match(masked.stack ?? "", /^TypeError: connect failed for <redacted:credential>\n\s+at /);
+  assert.doesNotMatch(masked.stack ?? "", /s3cr3t-value/);
 });
