@@ -58,7 +58,12 @@ import { createBackgroundBroker } from "../connectors/background-exec-broker.ts"
 import { createMonitorBroker, readBackgroundOutputTail } from "../monitors/monitor-broker.ts";
 import { isPollSurface, isSilentPollReply } from "../triggers/run-trigger.ts";
 import { envKey } from "../credentials/connector-token.ts";
-import { credentialHandle, renderKeychainManifest, type PublicServiceCredential } from "../credentials/keychain.ts";
+import {
+  credentialHandle,
+  isValidServiceCredentialEnvKey,
+  renderKeychainManifest,
+  type PublicServiceCredential,
+} from "../credentials/keychain.ts";
 import {
   captureDeviceFlowLogins,
   deviceFlowCredOwner,
@@ -1924,7 +1929,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           })());
         for (const credential of available) {
           if (credential.delivery === "env") {
-            if ((!allInternal && !external) || !credential.envKey) continue;
+            if ((!allInternal && !external) || !credential.envKey || !isValidServiceCredentialEnvKey(credential.envKey))
+              continue;
             addCredential(
               {
                 handle: `service_${credential.slug}`,

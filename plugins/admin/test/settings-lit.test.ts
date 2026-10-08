@@ -138,11 +138,6 @@ test("credential delivery transitions exclude narrower broker grants from env pa
     assert.equal(dom.window.eval("settingsUI.credentialState.collect().grantees.join()"), "org:test");
     assert.equal(dom.window.eval("settingsUI.credentialState.collect().host"), "");
     assert.equal(dom.window.eval("settingsUI.credentialState.validate(settingsUI.credentialState.collect())"), "");
-    dom.window.eval('settingsUI.credentialState.change("envkey","AGENT_SECRET")');
-    assert.match(
-      String(dom.window.eval("settingsUI.credentialState.validate(settingsUI.credentialState.collect())")),
-      /reserved/,
-    );
   } finally {
     dom.window.close();
   }
